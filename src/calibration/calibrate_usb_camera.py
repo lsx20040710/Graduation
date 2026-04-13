@@ -14,8 +14,8 @@ USB 相机标定辅助脚本。
 4. 将导出的参数接入后续 ROS2 图像链路或视觉伺服模块。
 
 命令示例：
-    python calibrate_usb_camera.py capture --cols 9 --rows 6 --width 1920 --height 1080
-    python calibrate_usb_camera.py calibrate --cols 9 --rows 6 --square-size-mm 15
+    python calibrate_usb_camera.py capture --cols 10 --rows 7 --width 1920 --height 1080
+    python calibrate_usb_camera.py calibrate --cols 10 --rows 7 --square-size-mm 20
     python calibrate_usb_camera.py preview --calibration-file output/camera_calibration.json
 """
 
