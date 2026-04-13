@@ -1,0 +1,26 @@
+<annotation>
+	<folder>JPEGImages</folder>
+	<filename>video_frame_00042.jpg</filename>
+	<path>D:\VOCdevkit\VOC2007\JPEGImages\video_frame_00042.jpg</path>
+	<source>
+		<database>Unknown</database>
+	</source>
+	<size>
+		<width>960</width>
+		<height>720</height>
+		<depth>3</depth>
+	</size>
+	<segmented>0</segmented>
+	<object>
+		<name>seacucumber</name>
+		<pose>Unspecified</pose>
+		<truncated>0</truncated>
+		<difficult>0</difficult>
+		<bndbox>
+			<xmin>519</xmin>
+			<ymin>254</ymin>
+			<xmax>601</xmax>
+			<ymax>382</ymax>
+		</bndbox>
+	</object>
+</annotation>

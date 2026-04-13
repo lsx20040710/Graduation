@@ -1,0 +1,7 @@
+# 该文件用于安装 src/calibration 目录下相机标定脚本的第三方依赖。
+# 这些脚本依赖 OpenCV 完成棋盘格检测、相机标定和畸变矫正，依赖 NumPy 处理矩阵与数组。
+# argparse、json、pathlib、dataclasses 等模块均来自 Python 标准库，无需单独安装。
+# 建议使用 Python 3.10 及以上版本运行当前脚本。
+
+opencv-python
+numpy

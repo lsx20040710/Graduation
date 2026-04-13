@@ -1,0 +1,11 @@
+path: ./datasets/my_dataset
+# 训练集和验证集的相对路径 (相对于上面的 path)
+train: images/train
+val: images/val
+
+# 类别总数
+nc: 1
+
+# 类别名称字典 (这里的索引顺序必须和转换脚本里的 CLASSES 一模一样)
+names:
+  0: "seacucumber"
