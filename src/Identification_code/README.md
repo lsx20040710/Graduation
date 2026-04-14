@@ -17,17 +17,66 @@ pip install -r requirements.txt
 
 ---
 
-### 第二步：准备数据 (XML 转 YOLO)
-如果你手里的是 XML 格式的标注文件，请运行：
+### 第二步：在独立环境中直接启动官方 LabelImg
+你当前验证下来最稳妥的做法，是在单独的 `Python 3.9` 环境里直接启动官方 `labelImg`，不要再依赖仓库里的启动脚本。
+
+推荐流程：
 
 ```bash
-python xml_to_yolo.py
+conda activate 你的标注环境
+labelImg
 ```
-它会将 `raw_data/xmls` 里的标注转换成 YOLO 能识别的 `.txt` 格式，并存放在 `raw_data/yolo_txts`。
+
+如果你还没有准备专门的标注环境，可以参考下面这组命令：
+
+```bash
+conda create -n labelimg39 python=3.9 -y
+conda activate labelimg39
+python -m pip install labelImg lxml
+```
+
+官方 `labelImg` 支持两种常用格式：
+1. `YOLO TXT`：直接生成训练可用的 `.txt` 标签；
+2. `Pascal VOC XML`：生成 `.xml` 标签，适合需要保留 VOC 标注时使用。
+
+默认类别文件在 `raw_data/predefined_classes.txt`，当前预置类别是 `seacucumber`。
+
+注意：
+1. 官方 `labelImg` 在 `YOLO TXT` 模式下，会把 `.txt` 直接保存到图片目录；
+2. 官方 `labelImg` 在 `Pascal VOC XML` 模式下，可以通过 `Ctrl+R` 指定 XML 输出目录；
+3. 模式切换按钮不在右下角，而是在官方 `labelImg` 工具栏中 `Save` 按钮的下方；
+4. 你当前已经验证 `Python 3.9` 环境直接启动官方 `labelImg` 最稳妥，文档后续都按这个流程说明；
+5. 当前训练流程推荐直接使用 `YOLO TXT` 模式，这样不再需要 XML 转换脚本。
+
+如果你想看更完整的中文说明和常见问题排查，请直接查看：
+
+```text
+LabelImg_中文使用说明.md
+```
+
+如果你需要先从视频抽帧，再进入标注，请运行：
+
+```bash
+python video_frames.py
+```
 
 ---
 
-### 第三步：开始训练模型
+### 第三步：划分训练集和验证集
+如果你使用 `YOLO TXT` 直接标注，那么图片和标签都在 `raw_data/images` 目录下。此时划分数据集时可以让图片目录和标签目录都指向这个目录：
+
+```bash
+python split_dataset.py --image-dir raw_data/images --label-dir raw_data/images --target-root datasets/my_dataset --val-ratio 0.2
+```
+
+补充说明：
+1. 如果某张图片没有同名 `.txt` 标签，`split_dataset.py` 不会报错；
+2. 当前脚本会复制这张图片，但不会复制标签文件；
+3. 这类图片会被当成“无目标负样本”参与训练。
+
+---
+
+### 第四步：开始训练模型
 当你准备好数据集并配置好 `data.yaml` 后（请确保 `data.yaml` 中的 `path` 指向你的数据集文件夹），运行：
 
 ```bash
@@ -37,7 +86,7 @@ python train_yolo26.py
 
 ---
 
-### 第四步：启动巡检/推理 (带界面)
+### 第五步：启动巡检/推理 (带界面)
 训练完成后（或者直接使用现有的 `yolo26m.pt`），运行：
 
 ```bash

@@ -25,6 +25,52 @@ def _resolve_path(path):
         return path
     return os.path.join(_script_dir(), path)
 
+def _find_latest_best_weight():
+    """
+    作用：
+    在当前工作区的训练输出目录中查找最新的 best.pt，优先作为推理默认权重。
+
+    返回：
+    - str | None: 找到时返回最新权重绝对路径；未找到时返回 None。
+    """
+    search_root = os.path.join(_script_dir(), "runs", "detect", "yolo26_runs")
+    if not os.path.isdir(search_root):
+        return None
+
+    candidates = []
+    for current_root, _, filenames in os.walk(search_root):
+        if "best.pt" not in filenames:
+            continue
+
+        # 只收集实际存在的最优权重，后面按修改时间选最新实验。
+        best_weight_path = os.path.join(current_root, "best.pt")
+        candidates.append(best_weight_path)
+
+    if not candidates:
+        return None
+
+    candidates.sort(key=os.path.getmtime, reverse=True)
+    return candidates[0]
+
+def _default_model_path():
+    """
+    作用：
+    统一推理模块的默认权重选择逻辑，避免命令行入口和 GUI 入口各自写死不同路径。
+
+    返回：
+    - str: 可用的默认权重路径；若当前没有训练产物，则退回仓库自带预训练权重。
+    """
+    latest_best_weight = _find_latest_best_weight()
+    if latest_best_weight:
+        return latest_best_weight
+
+    # 当前没有训练产物时，至少保证 GUI 有一个真实存在的可选默认值。
+    fallback_pretrained_weight = os.path.join(_script_dir(), "yolo26m.pt")
+    if os.path.exists(fallback_pretrained_weight):
+        return fallback_pretrained_weight
+
+    return ""
+
 def three_channel_underwater_enhance(frame):
     """
     三通道水下色彩补偿与增强算法
@@ -250,7 +296,7 @@ def _infer_video_or_camera(model, source, source_type, conf=0.5):
 
 def run_inference(mode, source_path=None, camera_index=0, model_path=None, conf=0.5):
     if model_path is None:
-        model_path = "runs/detect/yolo26_runs/project3/weights/best.pt"
+        model_path = _default_model_path()
 
     model_path = _resolve_path(model_path)
     if not model_path or not os.path.exists(model_path):
@@ -309,7 +355,7 @@ class _App:
         self.mode_var = tk.StringVar(value="图片")
         self.file_var = tk.StringVar(value="")
         self.camera_var = tk.StringVar(value="")
-        self.model_var = tk.StringVar(value="runs/detect/yolo26_runs/project2/weights/best.pt")
+        self.model_var = tk.StringVar(value=_default_model_path())
         self.conf_var = tk.DoubleVar(value=0.5)
         self.status_var = tk.StringVar(value="就绪")
 
