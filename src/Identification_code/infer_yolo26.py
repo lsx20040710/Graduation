@@ -1,519 +1,1226 @@
-import cv2
-import datetime
+"""
+文件作用：
+为海参检测模型提供可复用的推理入口，同时保留本地交互式选择界面。
+
+主要内容：
+1. 自动搜索当前工程里最新的 YOLO 权重，并允许用户手动切换其他 .pt 文件；
+2. 交互选择识别模式，支持图片、视频和摄像头三种输入源；
+3. 将权重搜索、路径选择、摄像头探测和推理执行拆成独立函数，便于后续工程直接复用；
+4. 提供可直接 import 的推理类，方便后续视觉伺服链路在单帧或连续流上复用检测能力。
+"""
+
+from __future__ import annotations
+
+import argparse
 import os
-import numpy as np
+from dataclasses import dataclass, field
+from datetime import datetime
+from pathlib import Path
+from typing import Literal
+
+# Windows 环境里，OpenCV、PyTorch、NumPy 混合使用时偶尔会触发 OpenMP 重复加载报错。
+# 这里沿用训练脚本的兼容处理，避免脚本一启动就因为底层运行时冲突退出。
+if os.name == "nt":
+    os.environ.setdefault("KMP_DUPLICATE_LIB_OK", "TRUE")
+
+import cv2
 from ultralytics import YOLO
-import threading
-import tkinter as tk
-from tkinter import ttk, filedialog, messagebox
 
-def _script_dir():
-    return os.path.dirname(os.path.abspath(__file__))
+try:
+    import tkinter as tk
+    from tkinter import filedialog, messagebox, simpledialog, ttk
+except Exception:
+    # 某些无桌面环境下可能无法正常导入 Tk。
+    # 这里保留降级分支，后续自动退回命令行交互，避免脚本完全不可用。
+    tk = None
+    filedialog = None
+    messagebox = None
+    simpledialog = None
+    ttk = None
 
-def _ensure_output_dir():
-    out_dir = os.path.join(_script_dir(), "output")
-    os.makedirs(out_dir, exist_ok=True)
-    return out_dir
 
-def _resolve_path(path):
-    if path is None:
-        return None
-    path = str(path).strip()
-    if not path:
-        return None
-    if os.path.isabs(path):
-        return path
-    return os.path.join(_script_dir(), path)
+# 当前脚本所在目录，所有相对路径都以这里为基准，避免从其他目录启动时找不到权重或测试素材。
+SCRIPT_DIR = Path(__file__).resolve().parent
 
-def _find_latest_best_weight():
+# 默认推理结果输出目录，和训练结果分开，避免识别结果覆盖训练产物。
+DEFAULT_PREDICT_PROJECT_DIR = SCRIPT_DIR / "runs" / "predict"
+
+# 统一维护常见图片和视频后缀，用于交互选择时给出更明确的过滤条件。
+IMAGE_SUFFIXES = {".jpg", ".jpeg", ".png", ".bmp", ".webp"}
+VIDEO_SUFFIXES = {".mp4", ".avi", ".mov", ".mkv", ".wmv", ".flv", ".m4v"}
+
+# 摄像头分辨率优先按常见 USB 相机档位给出选项，兼顾当前设备说明里的 240p/480p/720p/1080p。
+CAMERA_RESOLUTION_PRESETS = [
+    ("default", "保持相机默认分辨率"),
+    ("1920x1080", "1920x1080 (1080p)"),
+    ("1280x720", "1280x720 (720p)"),
+    ("640x480", "640x480 (480p)"),
+    ("320x240", "320x240 (240p)"),
+    ("custom", "自定义分辨率"),
+]
+
+# 识别模式在模块内统一使用英文键值，便于和 YOLO 接口以及命令行参数保持一致。
+InferenceMode = Literal["image", "video", "camera"]
+
+
+@dataclass(frozen=True)
+class CameraInfo:
     """
     作用：
-    在当前工作区的训练输出目录中查找最新的 best.pt，优先作为推理默认权重。
-
-    返回：
-    - str | None: 找到时返回最新权重绝对路径；未找到时返回 None。
+    记录可用摄像头的索引和基础分辨率信息，方便界面和日志里展示。
     """
-    search_root = os.path.join(_script_dir(), "runs", "detect", "yolo26_runs")
-    if not os.path.isdir(search_root):
-        return None
 
-    candidates = []
-    for current_root, _, filenames in os.walk(search_root):
-        if "best.pt" not in filenames:
-            continue
+    index: int
+    width: int
+    height: int
+    backend_name: str
 
-        # 只收集实际存在的最优权重，后面按修改时间选最新实验。
-        best_weight_path = os.path.join(current_root, "best.pt")
-        candidates.append(best_weight_path)
+    @property
+    def display_name(self) -> str:
+        """返回给交互界面展示的摄像头说明文本。"""
 
-    if not candidates:
-        return None
+        resolution_text = "未知分辨率"
+        if self.width > 0 and self.height > 0:
+            resolution_text = f"{self.width}x{self.height}"
+        return f"摄像头 {self.index} | 分辨率：{resolution_text} | 后端：{self.backend_name}"
 
-    candidates.sort(key=os.path.getmtime, reverse=True)
-    return candidates[0]
 
-def _default_model_path():
+@dataclass
+class InferenceConfig:
     """
     作用：
-    统一推理模块的默认权重选择逻辑，避免命令行入口和 GUI 入口各自写死不同路径。
-
-    返回：
-    - str: 可用的默认权重路径；若当前没有训练产物，则退回仓库自带预训练权重。
+    统一管理一次推理任务的核心配置，便于命令行入口和其他工程共用同一套参数结构。
     """
-    latest_best_weight = _find_latest_best_weight()
-    if latest_best_weight:
-        return latest_best_weight
 
-    # 当前没有训练产物时，至少保证 GUI 有一个真实存在的可选默认值。
-    fallback_pretrained_weight = os.path.join(_script_dir(), "yolo26m.pt")
-    if os.path.exists(fallback_pretrained_weight):
-        return fallback_pretrained_weight
+    weight_path: Path
+    mode: InferenceMode
+    source: Path | int
+    camera_resolution: tuple[int, int] | None = None
+    conf: float = 0.25
+    imgsz: int | None = None
+    device: str | None = None
+    show: bool = True
+    save: bool = True
+    project_dir: Path = field(default_factory=lambda: DEFAULT_PREDICT_PROJECT_DIR)
+    run_name: str | None = None
 
-    return ""
+    def source_text(self) -> str:
+        """返回适合打印日志的输入源描述。"""
 
-def three_channel_underwater_enhance(frame):
+        if isinstance(self.source, Path):
+            return str(self.source)
+        return f"camera:{self.source}"
+
+
+@dataclass
+class InferenceSummary:
     """
-    三通道水下色彩补偿与增强算法
-    原理：针对水下红光衰减严重的物理特性，基于绿通道动态补偿红通道，并结合CLAHE去雾
+    作用：
+    汇总一次推理任务的执行结果，方便上层模块拿到统计信息后继续联动其他流程。
     """
-    # 1. 拆分 B, G, R 三个独立通道 (转为浮点数防溢出)
-    b, g, r = cv2.split(frame.astype(np.float32))
 
-    # 2. 计算各通道的全局平均亮度
-    mean_r = np.mean(r)
-    mean_g = np.mean(g)
-    mean_b = np.mean(b)
+    mode: InferenceMode
+    weight_path: Path
+    source_text: str
+    frame_count: int
+    detection_count: int
+    save_dir: Path | None
+    actual_resolution: tuple[int, int] | None = None
 
-    # 3. 【核心】三通道红色补偿机制
-    alpha = 0.8 
-    r_compensated = r + alpha * (mean_g - mean_r) * (1.0 - r / 255.0)
 
-    # 将补偿后的像素值限制在合理的 0-255 范围内
-    r_compensated = np.clip(r_compensated, 0, 255)
-    
-    # 4. 重新合并三通道
-    compensated_img = cv2.merge((b, g, r_compensated)).astype(np.uint8)
+class Yolo26Inferencer:
+    """
+    作用：
+    封装 YOLO 模型加载和多输入源推理逻辑，方便后续工程直接引用。
+    """
 
-    # 5. 转换到 LAB 色彩空间，对亮度通道 (L) 进行自适应直方图均衡化去雾
-    lab = cv2.cvtColor(compensated_img, cv2.COLOR_BGR2LAB)
-    l, a, b_chan = cv2.split(lab)
-    
-    clahe = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(8, 8))
-    cl = clahe.apply(l)
-    
-    # 合并并转回最终的 BGR 画面
-    enhanced_lab = cv2.merge((cl, a, b_chan))
-    final_img = cv2.cvtColor(enhanced_lab, cv2.COLOR_LAB2BGR)
+    def __init__(self, weight_path: str | Path, device: str | None = None) -> None:
+        """
+        作用：
+        根据权重路径初始化模型实例。
 
-    return final_img
+        参数：
+        - weight_path: YOLO 权重文件路径。
+        - device: 推理设备，示例值包括 "cpu"、"0"、"0,1"。
+        """
 
-def generate_report(source_type, total_count, output_dir=None, comparison_image_path=None, saved_video_path=None):
-    """生成简单的巡检报告"""
-    if output_dir is None:
-        output_dir = _ensure_output_dir()
-    else:
-        os.makedirs(output_dir, exist_ok=True)
+        self.weight_path = resolve_existing_file(weight_path)
+        self.device = device.strip() if isinstance(device, str) and device.strip() else None
 
-    timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    filename_time = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-    report_filename = f"Inspection_Report_{filename_time}.txt"
-    report_path = os.path.join(output_dir, report_filename)
-    
-    with open(report_path, "w", encoding="utf-8") as f:
-        f.write("=====================================\n")
-        f.write("      水下海产智能巡检与盘点报告     \n")
-        f.write("=====================================\n")
-        f.write(f"巡检时间: {timestamp}\n")
-        f.write(f"巡检模式: {source_type}\n")
-        f.write(f"盘点海参总数: {total_count} 只\n")
-        if comparison_image_path:
-            f.write(f"增强对比图: {comparison_image_path}\n")
-        if saved_video_path:
-            f.write(f"巡检录像(带框): {saved_video_path}\n")
-        f.write("=====================================\n")
-        
-    print(f"\n>> 巡检结束！已自动生成报告: {report_path}")
-    return report_path
+        # 模型对象在初始化阶段一次性创建，避免图片/视频/摄像头之间重复加载权重。
+        self.model = YOLO(str(self.weight_path))
 
-def _load_model(model_path):
-    try:
-        model = YOLO(model_path)
-        print(f">> 成功加载检测引擎: {model_path}")
-        return model
-    except Exception as e:
-        raise RuntimeError(f"权重加载失败，请确认路径。错误: {e}") from e
+    def infer_frame(self, frame, conf: float = 0.25, imgsz: int | None = None):
+        """
+        作用：
+        对单帧图像做一次推理，供后续视觉伺服或上层控制模块直接复用。
 
-def _infer_image(model, image_path, conf=0.5):
-    print(f">> 正在识别图片: {image_path}")
-    frame = cv2.imread(image_path)
-    if frame is None:
-        raise RuntimeError("图片读取失败，请检查文件是否损坏。")
+        参数：
+        - frame: OpenCV 读取到的 BGR 图像数组。
+        - conf: 置信度阈值。
+        - imgsz: 推理尺寸；传 None 表示沿用 YOLO 默认策略。
 
-    enhanced_frame = three_channel_underwater_enhance(frame)
-    results = model.predict(source=enhanced_frame, conf=conf, verbose=False)
+        返回：
+        - Results: ultralytics 的单帧推理结果对象。
+        """
 
-    window_name = "Underwater Inspection - Image (Enhanced)"
-    cv2.namedWindow(window_name, cv2.WINDOW_NORMAL)
+        if frame is None:
+            raise ValueError("单帧推理失败：输入 frame 为空。")
 
-    comparison_window = "Enhancement Comparison - Before vs After"
-    cv2.namedWindow(comparison_window, cv2.WINDOW_NORMAL)
+        predict_kwargs = self._build_common_predict_kwargs(conf=conf, imgsz=imgsz, show=False, save=False)
+        results = self.model.predict(source=frame, **predict_kwargs)
+        if not results:
+            raise RuntimeError("单帧推理未返回有效结果。")
+        return results[0]
 
-    out_dir = _ensure_output_dir()
-    filename_time = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-    comparison_path = os.path.join(out_dir, f"Enhancement_Comparison_{filename_time}.jpg")
+    def run(self, config: InferenceConfig) -> InferenceSummary:
+        """
+        作用：
+        按配置执行一次完整推理任务。
 
-    left = frame
-    right = enhanced_frame
-    if left.shape[:2] != right.shape[:2]:
-        right = cv2.resize(right, (left.shape[1], left.shape[0]))
-    pad = 6
-    gap = np.zeros((left.shape[0], pad, 3), dtype=np.uint8)
-    comparison_img = cv2.hconcat([left, gap, right])
-    cv2.putText(comparison_img, "Before", (20, 40), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 3)
-    cv2.putText(comparison_img, "After", (left.shape[1] + pad + 20, 40), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 3)
-    cv2.imwrite(comparison_path, comparison_img)
-    cv2.imshow(comparison_window, comparison_img)
+        参数：
+        - config: 本次推理的统一配置对象。
 
-    max_count = 0
-    for r in results:
-        annotated_frame = r.plot()
-        current_count = len(r.boxes)
-        max_count = current_count
-        cv2.putText(
-            annotated_frame,
-            f"Sea Cucumbers: {current_count}",
-            (20, 40),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            1,
-            (0, 0, 255),
-            3,
+        返回：
+        - InferenceSummary: 任务执行后的统计信息。
+        """
+
+        # 统一在真正执行前补齐 run_name，确保打印信息、保存目录和实际输出路径保持一致。
+        if config.save and not config.run_name:
+            config.run_name = build_default_run_name(config.mode)
+
+        if config.mode == "image":
+            return self.run_image(config)
+        if config.mode == "video":
+            return self.run_video(config)
+        if config.mode == "camera":
+            return self.run_camera(config)
+        raise ValueError(f"不支持的识别模式：{config.mode}")
+
+    def run_image(self, config: InferenceConfig) -> InferenceSummary:
+        """
+        作用：
+        对单张图片执行推理，并返回统计信息。
+
+        参数：
+        - config: 图片推理配置，source 必须是图片路径。
+
+        返回：
+        - InferenceSummary: 图片推理摘要。
+        """
+
+        source_path = ensure_mode_file_source(config.mode, config.source)
+        predict_kwargs = self._build_common_predict_kwargs(
+            conf=config.conf,
+            imgsz=config.imgsz,
+            show=config.show,
+            save=config.save,
+            project_dir=config.project_dir,
+            run_name=config.run_name,
         )
-        cv2.imshow(window_name, annotated_frame)
-        print(">> 增强识别完成。按任意键关闭图片并生成报告...")
-        cv2.waitKey(0)
-        cv2.destroyAllWindows()
 
-    return max_count, comparison_path
+        results = self.model.predict(source=str(source_path), **predict_kwargs)
+        detection_count = sum(len(result.boxes) for result in results if result.boxes is not None)
 
-def _open_capture(source, is_camera):
-    if is_camera:
-        cap = cv2.VideoCapture(int(source), cv2.CAP_DSHOW)
-        cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1280)
-        cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 720)
-        return cap
-    return cv2.VideoCapture(source)
+        return InferenceSummary(
+            mode=config.mode,
+            weight_path=self.weight_path,
+            source_text=str(source_path),
+            frame_count=len(results),
+            detection_count=detection_count,
+            save_dir=self._resolve_save_dir(config),
+        )
 
-def _infer_video_or_camera(model, source, source_type, conf=0.5):
-    cap = _open_capture(source, is_camera=(source_type == "实时摄像头"))
-    if not cap.isOpened():
-        raise RuntimeError("无法打开媒体源！请检查硬件或文件。")
+    def run_video(self, config: InferenceConfig) -> InferenceSummary:
+        """
+        作用：
+        对视频文件执行连续推理，并统计总帧数与总检测框数量。
 
-    # --- 新增：获取视频属性，初始化 VideoWriter ---
-    width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-    height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-    fps = cap.get(cv2.CAP_PROP_FPS)
-    if fps == 0 or np.isnan(fps):
-        fps = 25.0  # 如果是摄像头获取不到FPS，默认设定为25帧
+        参数：
+        - config: 视频推理配置，source 必须是视频路径。
 
-    out_dir = _ensure_output_dir()
-    filename_time = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-    # 根据模式动态命名视频文件
-    prefix = "Video" if source_type == "离线视频" else "Camera"
-    output_video_path = os.path.join(out_dir, f"Inference_{prefix}_{filename_time}.mp4")
-    
-    # 设置 MP4 编码器
-    fourcc = cv2.VideoWriter_fourcc(*'mp4v')
-    out_writer = cv2.VideoWriter(output_video_path, fourcc, fps, (width, height))
-    # ---------------------------------------------
+        返回：
+        - InferenceSummary: 视频推理摘要。
+        """
 
-    window_name = "Underwater Inspection - Video/Camera (Enhanced)"
-    cv2.namedWindow(window_name, cv2.WINDOW_NORMAL)
+        source_path = ensure_mode_file_source(config.mode, config.source)
+        predict_kwargs = self._build_common_predict_kwargs(
+            conf=config.conf,
+            imgsz=config.imgsz,
+            show=config.show,
+            save=config.save,
+            project_dir=config.project_dir,
+            run_name=config.run_name,
+        )
 
-    max_count = 0
-    print(">> 增强识别已启动！按键盘上的 'q' 键退出巡检。")
+        # 视频场景改成流式遍历，避免长视频一次性把所有帧结果堆进内存。
+        frame_count = 0
+        detection_count = 0
+        result_stream = self.model.predict(source=str(source_path), stream=True, **predict_kwargs)
+        for result in result_stream:
+            frame_count += 1
+            if result.boxes is not None:
+                detection_count += len(result.boxes)
+
+        return InferenceSummary(
+            mode=config.mode,
+            weight_path=self.weight_path,
+            source_text=str(source_path),
+            frame_count=frame_count,
+            detection_count=detection_count,
+            save_dir=self._resolve_save_dir(config),
+        )
+
+    def run_camera(self, config: InferenceConfig) -> InferenceSummary:
+        """
+        作用：
+        对本地摄像头执行连续推理，适合现场联调或后续上层控制链路接入前的识别验证。
+
+        参数：
+        - config: 摄像头推理配置，source 必须是摄像头索引。
+
+        返回：
+        - InferenceSummary: 摄像头推理摘要。
+        """
+
+        if not isinstance(config.source, int):
+            raise ValueError("摄像头模式要求 source 为整数索引。")
+
+        backend_flag = cv2.CAP_DSHOW if os.name == "nt" else cv2.CAP_ANY
+        capture = cv2.VideoCapture(config.source, backend_flag)
+        if not capture.isOpened():
+            capture.release()
+            raise RuntimeError(f"无法打开摄像头 {config.source}，请检查索引或设备占用情况。")
+
+        requested_resolution = config.camera_resolution
+        if requested_resolution is not None:
+            requested_width, requested_height = requested_resolution
+
+            # 分辨率必须在真正读帧前写入，否则很多 USB 相机会忽略设置请求。
+            capture.set(cv2.CAP_PROP_FRAME_WIDTH, requested_width)
+            capture.set(cv2.CAP_PROP_FRAME_HEIGHT, requested_height)
+
+        window_name = f"YOLO Camera {config.source}"
+        frame_count = 0
+        detection_count = 0
+        writer = None
+        save_dir = self._resolve_save_dir(config)
+
+        try:
+            actual_width = int(capture.get(cv2.CAP_PROP_FRAME_WIDTH))
+            actual_height = int(capture.get(cv2.CAP_PROP_FRAME_HEIGHT))
+            actual_resolution = (actual_width, actual_height)
+
+            if requested_resolution is not None:
+                print(f"摄像头请求分辨率：{requested_resolution[0]}x{requested_resolution[1]}")
+            print(f"摄像头实际分辨率：{actual_width}x{actual_height}")
+
+            # 某些驱动会静默回退到它真正支持的档位，这里把差异明确提示出来，方便联调。
+            if requested_resolution is not None and requested_resolution != actual_resolution:
+                print("注意：当前摄像头或驱动未完全接受请求分辨率，已按实际分辨率继续运行。")
+
+            if config.save and save_dir is not None:
+                save_dir.mkdir(parents=True, exist_ok=True)
+                output_path = save_dir / f"camera_{config.source}.mp4"
+
+                capture_fps = capture.get(cv2.CAP_PROP_FPS)
+                if capture_fps <= 1:
+                    # USB 相机常见情况是拿不到有效 FPS，这里回退到 30，保证录制文件能正常写出。
+                    capture_fps = 30.0
+
+                fourcc = cv2.VideoWriter_fourcc(*"mp4v")
+                writer = cv2.VideoWriter(str(output_path), fourcc, capture_fps, actual_resolution)
+                if not writer.isOpened():
+                    raise RuntimeError(f"无法创建视频输出文件：{output_path}")
+
+            while True:
+                read_ok, frame = capture.read()
+                if not read_ok or frame is None:
+                    print("摄像头读帧失败，当前推理任务结束。")
+                    break
+
+                result = self.infer_frame(frame=frame, conf=config.conf, imgsz=config.imgsz)
+                frame_count += 1
+                if result.boxes is not None:
+                    detection_count += len(result.boxes)
+
+                annotated_frame = result.plot()
+
+                if writer is not None:
+                    writer.write(annotated_frame)
+
+                if config.show:
+                    cv2.imshow(window_name, annotated_frame)
+
+                    # 摄像头模式下保留 q / Esc 退出，避免必须强制关进程才能结束演示。
+                    key_code = cv2.waitKey(1) & 0xFF
+                    if key_code in (27, ord("q"), ord("Q")):
+                        break
+
+            return InferenceSummary(
+                mode=config.mode,
+                weight_path=self.weight_path,
+                source_text=f"camera:{config.source}",
+                frame_count=frame_count,
+                detection_count=detection_count,
+                save_dir=save_dir,
+                actual_resolution=actual_resolution,
+            )
+        finally:
+            capture.release()
+            if writer is not None:
+                writer.release()
+            if config.show:
+                cv2.destroyAllWindows()
+
+    def _build_common_predict_kwargs(
+        self,
+        conf: float,
+        imgsz: int | None,
+        show: bool,
+        save: bool,
+        project_dir: Path | None = None,
+        run_name: str | None = None,
+    ) -> dict:
+        """
+        作用：
+        构建图片、视频、摄像头三种场景共用的 YOLO 推理参数。
+
+        参数：
+        - conf: 置信度阈值。
+        - imgsz: 推理尺寸。
+        - show: 是否显示识别窗口。
+        - save: 是否保存识别结果。
+        - project_dir: 结果输出根目录。
+        - run_name: 本次输出子目录名。
+
+        返回：
+        - dict: 可直接传给 model.predict 的参数字典。
+        """
+
+        predict_kwargs = {
+            "conf": conf,
+            "show": show,
+            "save": save,
+            "verbose": False,
+        }
+
+        # 这些参数只有在用户显式传入时才覆盖默认值，避免无意义地改变 ultralytics 的原生行为。
+        if imgsz is not None and imgsz > 0:
+            predict_kwargs["imgsz"] = imgsz
+        if self.device:
+            predict_kwargs["device"] = self.device
+        if project_dir is not None:
+            predict_kwargs["project"] = str(project_dir)
+        if run_name:
+            predict_kwargs["name"] = run_name
+            predict_kwargs["exist_ok"] = True
+
+        return predict_kwargs
+
+    def _resolve_save_dir(self, config: InferenceConfig) -> Path | None:
+        """
+        作用：
+        根据当前配置推导 YOLO 结果保存目录，便于在日志里提示用户输出位置。
+
+        参数：
+        - config: 本次推理配置。
+
+        返回：
+        - Path | None: 若启用了保存则返回结果目录，否则返回 None。
+        """
+
+        if not config.save:
+            return None
+
+        # 如果上层没有传 run_name，就按当前时间自动生成，确保不同任务输出目录互不覆盖。
+        run_name = config.run_name or build_default_run_name(config.mode)
+        return config.project_dir / run_name
+
+
+def build_parser() -> argparse.ArgumentParser:
+    """
+    作用：
+    构建命令行参数入口，既支持完全交互式启动，也支持被其他脚本直接无界面调用。
+
+    返回：
+    - argparse.ArgumentParser: 配置完成的参数解析器。
+    """
+
+    parser = argparse.ArgumentParser(description="海参检测交互式推理脚本")
+    parser.add_argument("--weight", default="", help="手动指定权重路径；不传时自动搜索最新权重。")
+    parser.add_argument("--mode", choices=["image", "video", "camera"], default="", help="手动指定识别模式。")
+    parser.add_argument("--source", default="", help="图片或视频路径；当 mode 为 image/video 时使用。")
+    parser.add_argument("--camera", type=int, default=None, help="摄像头索引；当 mode 为 camera 时使用。")
+    parser.add_argument(
+        "--camera-resolution",
+        default="",
+        help='摄像头分辨率，例如 "1920x1080"；不传时可在交互界面里选择。',
+    )
+    parser.add_argument("--conf", type=float, default=0.25, help="置信度阈值，默认 0.25。")
+    parser.add_argument("--imgsz", type=int, default=0, help="推理尺寸；传 0 表示沿用默认设置。")
+    parser.add_argument("--device", default="", help='推理设备，例如 "cpu"、"0"。')
+    parser.add_argument("--project", default="", help="识别结果输出目录，默认写入 runs/predict。")
+    parser.add_argument("--run-name", default="", help="识别结果子目录名；不传时按时间自动生成。")
+    parser.add_argument("--noshow", action="store_true", help="不弹出识别显示窗口。")
+    parser.add_argument("--nosave", action="store_true", help="不保存识别结果。")
+    parser.add_argument("--no-gui", action="store_true", help="禁用 Tk 图形交互，强制使用命令行选择。")
+    parser.add_argument(
+        "--no-prompt",
+        action="store_true",
+        help="禁用交互式补全。启用后必须把缺失参数全部通过命令行传完整。",
+    )
+    parser.add_argument("--max-camera-probe", type=int, default=6, help="自动探测摄像头时扫描的最大索引数。")
+    return parser
+
+
+def resolve_path(path_text: str | Path) -> Path:
+    """
+    作用：
+    将相对路径统一解析成绝对路径，避免从其他工作目录运行时定位失败。
+
+    参数：
+    - path_text: 输入的路径文本或 Path 对象。
+
+    返回：
+    - Path: 解析后的绝对路径。
+    """
+
+    raw_path = Path(path_text)
+    if raw_path.is_absolute():
+        return raw_path.resolve()
+
+    # 命令行从仓库根目录启动时，用户更常传“相对当前工作目录”的路径。
+    # 这里优先尊重用户当前终端位置；只有找不到时再回退到脚本目录，兼容双击脚本启动场景。
+    cwd_relative_path = raw_path.resolve()
+    if cwd_relative_path.exists():
+        return cwd_relative_path
+
+    return (SCRIPT_DIR / raw_path).resolve()
+
+
+def resolve_existing_path(path_text: str | Path) -> Path:
+    """
+    作用：
+    解析路径并强制检查文件是否存在，避免模型加载或媒体读取阶段才暴露错误。
+
+    参数：
+    - path_text: 输入路径。
+
+    返回：
+    - Path: 已确认存在的绝对路径。
+    """
+
+    resolved_path = resolve_path(path_text)
+    if not resolved_path.exists():
+        raise FileNotFoundError(f"路径不存在：{resolved_path}")
+    return resolved_path
+
+
+def resolve_existing_file(path_text: str | Path) -> Path:
+    """
+    作用：
+    解析路径并检查它确实是文件，避免把目录误当成权重或媒体文件传入后续流程。
+
+    参数：
+    - path_text: 输入路径。
+
+    返回：
+    - Path: 已确认存在且为文件的绝对路径。
+    """
+
+    resolved_path = resolve_existing_path(path_text)
+    if not resolved_path.is_file():
+        raise FileNotFoundError(f"目标不是文件：{resolved_path}")
+    return resolved_path
+
+
+def ensure_mode_file_source(mode: InferenceMode, source: Path | int) -> Path:
+    """
+    作用：
+    校验图片/视频模式下的 source 必须是文件路径，避免模式和输入源类型不匹配。
+
+    参数：
+    - mode: 当前识别模式。
+    - source: 当前输入源。
+
+    返回：
+    - Path: 已确认有效的文件路径。
+    """
+
+    if isinstance(source, int):
+        raise ValueError(f"{mode} 模式要求 source 为文件路径，当前却收到摄像头索引。")
+    return resolve_existing_file(source)
+
+
+def list_weight_candidates(search_root: Path = SCRIPT_DIR) -> list[Path]:
+    """
+    作用：
+    搜索工程内常见位置的权重文件，并按最近修改时间从新到旧排序。
+
+    参数：
+    - search_root: 搜索根目录，默认从当前识别脚本目录开始。
+
+    返回：
+    - list[Path]: 已排序的权重文件列表。
+    """
+
+    candidate_paths: set[Path] = set()
+
+    # 训练输出目录优先纳入搜索，因为“最新权重”通常就在这里产生。
+    for weight_path in search_root.glob("runs/**/weights/*.pt"):
+        if weight_path.is_file():
+            candidate_paths.add(weight_path.resolve())
+
+    # 根目录下的预训练权重也保留，方便用户回退到基础模型做对比。
+    for weight_path in search_root.glob("*.pt"):
+        if weight_path.is_file():
+            candidate_paths.add(weight_path.resolve())
+
+    return sorted(candidate_paths, key=lambda path: path.stat().st_mtime, reverse=True)
+
+
+def find_latest_weight(search_root: Path = SCRIPT_DIR) -> Path:
+    """
+    作用：
+    返回当前工程里最近修改的权重文件。
+
+    参数：
+    - search_root: 权重搜索根目录。
+
+    返回：
+    - Path: 最新权重路径。
+    """
+
+    candidate_paths = list_weight_candidates(search_root)
+    if not candidate_paths:
+        raise FileNotFoundError(f"未在 {search_root} 下找到任何 .pt 权重文件。")
+    return candidate_paths[0]
+
+
+def build_default_run_name(mode: InferenceMode) -> str:
+    """
+    作用：
+    为本次推理任务生成稳定且可区分的默认输出目录名。
+
+    参数：
+    - mode: 当前识别模式。
+
+    返回：
+    - str: 形如 image_20260414_182530 的目录名。
+    """
+
+    return f"{mode}_{datetime.now():%Y%m%d_%H%M%S}"
+
+
+def parse_camera_resolution(resolution_text: str) -> tuple[int, int] | None:
+    """
+    作用：
+    解析命令行或交互输入的分辨率文本。
+
+    参数：
+    - resolution_text: 形如 1920x1080 的分辨率字符串，也支持 default。
+
+    返回：
+    - tuple[int, int] | None: 返回宽高元组；若表示默认分辨率则返回 None。
+    """
+
+    normalized_text = resolution_text.strip().lower().replace(" ", "")
+    if not normalized_text or normalized_text == "default":
+        return None
+
+    if "x" not in normalized_text:
+        raise ValueError(f"分辨率格式错误：{resolution_text}，正确格式应为 宽x高，例如 1280x720。")
+
+    width_text, height_text = normalized_text.split("x", maxsplit=1)
+    width = int(width_text)
+    height = int(height_text)
+
+    if width <= 0 or height <= 0:
+        raise ValueError(f"分辨率必须为正整数，当前输入：{resolution_text}")
+
+    return width, height
+
+
+def create_tk_root() -> tk.Tk | None:
+    """
+    作用：
+    创建一个隐藏的 Tk 根窗口，供文件选择框或弹窗使用。
+
+    返回：
+    - tk.Tk | None: 创建成功则返回根窗口，失败则返回 None。
+    """
+
+    if tk is None:
+        return None
+
+    root = tk.Tk()
+    root.withdraw()
+    root.attributes("-topmost", True)
+    return root
+
+
+def select_weight_path_interactive(use_gui: bool = True, search_root: Path = SCRIPT_DIR) -> Path:
+    """
+    作用：
+    自动定位最新权重，并保留手动切换权重文件的交互入口。
+
+    参数：
+    - use_gui: 是否优先使用图形界面。
+    - search_root: 权重搜索根目录。
+
+    返回：
+    - Path: 用户最终确认的权重路径。
+    """
+
+    latest_weight = find_latest_weight(search_root)
+
+    # 图形界面优先提供“直接用最新权重 / 手动另选文件”两步式交互。
+    if use_gui and tk is not None and messagebox is not None and filedialog is not None:
+        root = None
+        try:
+            root = create_tk_root()
+            use_latest = messagebox.askyesno(
+                "权重选择",
+                f"已自动定位到最新权重：\n{latest_weight}\n\n点击“是”直接使用；点击“否”手动选择其他权重。",
+                parent=root,
+            )
+            if use_latest:
+                return latest_weight
+
+            selected_path = filedialog.askopenfilename(
+                title="请选择 YOLO 权重文件",
+                initialdir=str(latest_weight.parent),
+                filetypes=[("PyTorch 权重", "*.pt"), ("所有文件", "*.*")],
+            )
+            if selected_path:
+                return resolve_existing_file(selected_path)
+        except Exception:
+            # 图形界面失败时自动退回命令行，不让整个脚本卡死在 GUI 初始化阶段。
+            pass
+        finally:
+            if root is not None:
+                root.destroy()
+
+    print(f"\n已自动定位到最新权重：{latest_weight}")
+    custom_choice = input("直接使用该权重请按回车；输入 y 后手动指定其他 .pt 文件：").strip().lower()
+    if custom_choice != "y":
+        return latest_weight
 
     while True:
-        success, frame = cap.read()
-        if not success:
-            print(">> 视频流结束或中断。")
-            break
+        custom_path = input("请输入权重文件路径：").strip()
+        if not custom_path:
+            print("未输入路径，继续使用最新权重。")
+            return latest_weight
+        try:
+            return resolve_existing_file(custom_path)
+        except FileNotFoundError as error:
+            print(error)
 
-        enhanced_frame = three_channel_underwater_enhance(frame)
-        results = model.predict(source=enhanced_frame, conf=conf, stream=True, verbose=False)
 
-        for r in results:
-            annotated_frame = r.plot()
-            current_count = len(r.boxes)
-            if current_count > max_count:
-                max_count = current_count
+def select_mode_interactive(use_gui: bool = True) -> InferenceMode:
+    """
+    作用：
+    交互式选择识别模式。
 
-            speed_ms = sum(r.speed.values())
-            actual_fps = 1000.0 / speed_ms if speed_ms > 0 else 0
+    参数：
+    - use_gui: 是否优先使用图形界面。
 
-            cv2.putText(
-                annotated_frame,
-                f"FPS: {actual_fps:.1f}",
-                (20, 40),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                1,
-                (0, 255, 0),
-                2,
+    返回：
+    - InferenceMode: 用户选择的模式。
+    """
+
+    mode_options = [
+        ("image", "图片模式"),
+        ("video", "视频模式"),
+        ("camera", "摄像头模式"),
+    ]
+
+    selected_mode = choose_option_interactive(
+        title="识别模式选择",
+        prompt="请选择要执行的识别模式：",
+        options=mode_options,
+        default_value="image",
+        use_gui=use_gui,
+    )
+    return selected_mode  # type: ignore[return-value]
+
+
+def select_media_path_interactive(mode: InferenceMode, use_gui: bool = True) -> Path:
+    """
+    作用：
+    为图片或视频模式交互选择输入文件路径。
+
+    参数：
+    - mode: 当前识别模式，只能是 image 或 video。
+    - use_gui: 是否优先使用图形界面。
+
+    返回：
+    - Path: 用户选择的媒体文件路径。
+    """
+
+    if mode not in {"image", "video"}:
+        raise ValueError("只有图片和视频模式才需要选择文件路径。")
+
+    filetypes = [("所有文件", "*.*")]
+    title = "请选择输入文件"
+    if mode == "image":
+        filetypes = [("图片文件", "*.jpg *.jpeg *.png *.bmp *.webp"), ("所有文件", "*.*")]
+        title = "请选择待识别图片"
+    elif mode == "video":
+        filetypes = [("视频文件", "*.mp4 *.avi *.mov *.mkv *.wmv *.flv *.m4v"), ("所有文件", "*.*")]
+        title = "请选择待识别视频"
+
+    if use_gui and tk is not None and filedialog is not None:
+        root = None
+        try:
+            root = create_tk_root()
+            selected_path = filedialog.askopenfilename(
+                title=title,
+                initialdir=str(SCRIPT_DIR),
+                filetypes=filetypes,
             )
-            cv2.putText(
-                annotated_frame,
-                f"Current Count: {current_count}",
-                (20, 80),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                1,
-                (0, 0, 255),
-                2,
-            )
-            cv2.putText(
-                annotated_frame,
-                f"Total Found: {max_count}",
-                (20, 120),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                1,
-                (255, 165, 0),
-                2,
-            )
+            if selected_path:
+                return resolve_existing_file(selected_path)
+        except Exception:
+            pass
+        finally:
+            if root is not None:
+                root.destroy()
 
-            # --- 新增：将带识别框的当前帧写入视频文件 ---
-            out_writer.write(annotated_frame)
+    while True:
+        custom_path = input(f"{title}，请输入文件路径：").strip()
+        try:
+            return resolve_existing_file(custom_path)
+        except FileNotFoundError as error:
+            print(error)
 
-            # 弹窗播放
-            cv2.imshow(window_name, annotated_frame)
 
-        if cv2.waitKey(1) & 0xFF == ord("q"):
-            break
+def probe_camera_indices(max_camera_probe: int = 6) -> list[CameraInfo]:
+    """
+    作用：
+    预扫描本机可用摄像头，便于在交互界面里让用户明确选择设备索引。
 
-    cap.release()
-    out_writer.release() # 记得释放写入器
-    cv2.destroyAllWindows()
-    
-    # 返回盘点最大数量以及保存的视频路径
-    return max_count, output_video_path
+    参数：
+    - max_camera_probe: 最大探测索引数，会按 0 到该值前一位依次扫描。
 
-def run_inference(mode, source_path=None, camera_index=0, model_path=None, conf=0.5):
-    if model_path is None:
-        model_path = _default_model_path()
+    返回：
+    - list[CameraInfo]: 当前可用摄像头列表。
+    """
 
-    model_path = _resolve_path(model_path)
-    if not model_path or not os.path.exists(model_path):
-        raise RuntimeError(f"找不到权重文件: {model_path}")
+    camera_infos: list[CameraInfo] = []
+    backend_flag = cv2.CAP_DSHOW if os.name == "nt" else cv2.CAP_ANY
 
-    model = _load_model(model_path)
-    output_dir = _ensure_output_dir()
-
-    if mode == "图片":
-        source_path = _resolve_path(source_path)
-        if not source_path or not os.path.exists(source_path):
-            raise RuntimeError("找不到图片文件。")
-        max_count, comparison_path = _infer_image(model, source_path, conf=conf)
-        generate_report("单张图片", max_count, output_dir=output_dir, comparison_image_path=comparison_path)
-        return
-
-    if mode == "视频":
-        source_path = _resolve_path(source_path)
-        if not source_path or not os.path.exists(source_path):
-            raise RuntimeError("找不到视频文件。")
-        # 接收返回的视频路径并传给生成报告函数
-        max_count, saved_video_path = _infer_video_or_camera(model, source_path, "离线视频", conf=conf)
-        generate_report("离线视频", max_count, output_dir=output_dir, saved_video_path=saved_video_path)
-        return
-
-    if mode == "摄像头":
-        # 接收返回的视频路径并传给生成报告函数
-        max_count, saved_video_path = _infer_video_or_camera(model, int(camera_index), "实时摄像头", conf=conf)
-        generate_report("实时摄像头", max_count, output_dir=output_dir, saved_video_path=saved_video_path)
-        return
-
-    raise RuntimeError("无效的模式。")
-
-def _enumerate_cameras(max_index=10):
-    indices = []
-    for i in range(max_index):
-        cap = cv2.VideoCapture(i, cv2.CAP_DSHOW)
-        if cap is None or not cap.isOpened():
-            try:
-                cap.release()
-            except Exception:
-                pass
+    for index in range(max_camera_probe):
+        capture = cv2.VideoCapture(index, backend_flag)
+        if not capture.isOpened():
+            capture.release()
             continue
-        ok, _ = cap.read()
-        cap.release()
-        if ok:
-            indices.append(i)
-    return indices
 
-class _App:
-    def __init__(self, root):
-        self.root = root
-        self.root.title("水下海产智能巡检与盘点助手")
-        self.root.resizable(False, False)
+        # 这里主动抓一帧，目的是过滤掉“索引存在但无法真正读帧”的伪可用设备。
+        read_ok, _ = capture.read()
+        if not read_ok:
+            capture.release()
+            continue
 
-        self.mode_var = tk.StringVar(value="图片")
-        self.file_var = tk.StringVar(value="")
-        self.camera_var = tk.StringVar(value="")
-        self.model_var = tk.StringVar(value=_default_model_path())
-        self.conf_var = tk.DoubleVar(value=0.5)
-        self.status_var = tk.StringVar(value="就绪")
-
-        main = ttk.Frame(root, padding=14)
-        main.grid(row=0, column=0, sticky="nsew")
-
-        ttk.Label(main, text="模式").grid(row=0, column=0, sticky="w")
-        self.mode_combo = ttk.Combobox(
-            main,
-            textvariable=self.mode_var,
-            values=["图片", "视频", "摄像头"],
-            state="readonly",
-            width=18,
-        )
-        self.mode_combo.grid(row=0, column=1, sticky="w", padx=(8, 0))
-        self.mode_combo.bind("<<ComboboxSelected>>", lambda _e: self._refresh_ui_state())
-
-        ttk.Label(main, text="权重").grid(row=1, column=0, sticky="w", pady=(10, 0))
-        self.model_entry = ttk.Entry(main, textvariable=self.model_var, width=44)
-        self.model_entry.grid(row=1, column=1, sticky="w", padx=(8, 0), pady=(10, 0))
-        ttk.Button(main, text="选择", command=self._pick_model).grid(row=1, column=2, sticky="w", padx=(8, 0), pady=(10, 0))
-
-        ttk.Label(main, text="文件").grid(row=2, column=0, sticky="w", pady=(10, 0))
-        self.file_entry = ttk.Entry(main, textvariable=self.file_var, width=44)
-        self.file_entry.grid(row=2, column=1, sticky="w", padx=(8, 0), pady=(10, 0))
-        self.pick_btn = ttk.Button(main, text="选择", command=self._pick_file)
-        self.pick_btn.grid(row=2, column=2, sticky="w", padx=(8, 0), pady=(10, 0))
-
-        ttk.Label(main, text="摄像头").grid(row=3, column=0, sticky="w", pady=(10, 0))
-        self.camera_combo = ttk.Combobox(main, textvariable=self.camera_var, values=[], state="readonly", width=18)
-        self.camera_combo.grid(row=3, column=1, sticky="w", padx=(8, 0), pady=(10, 0))
-        ttk.Button(main, text="刷新", command=self._refresh_cameras).grid(row=3, column=2, sticky="w", padx=(8, 0), pady=(10, 0))
-
-        ttk.Label(main, text="置信度").grid(row=4, column=0, sticky="w", pady=(10, 0))
-        self.conf_spin = ttk.Spinbox(main, from_=0.01, to=0.99, increment=0.01, textvariable=self.conf_var, width=6)
-        self.conf_spin.grid(row=4, column=1, sticky="w", padx=(8, 0), pady=(10, 0))
-
-        btns = ttk.Frame(main)
-        btns.grid(row=5, column=0, columnspan=3, sticky="w", pady=(14, 0))
-        self.start_btn = ttk.Button(btns, text="开始巡检", command=self._start)
-        self.start_btn.grid(row=0, column=0, sticky="w")
-        ttk.Button(btns, text="退出", command=self.root.destroy).grid(row=0, column=1, sticky="w", padx=(10, 0))
-
-        ttk.Label(main, textvariable=self.status_var, foreground="#444").grid(row=6, column=0, columnspan=3, sticky="w", pady=(12, 0))
-
-        self._refresh_cameras()
-        self._refresh_ui_state()
-
-    def _pick_model(self):
-        path = filedialog.askopenfilename(
-            title="选择 YOLO 权重文件",
-            filetypes=[("PyTorch Weights", "*.pt"), ("All Files", "*.*")],
-        )
-        if path:
-            self.model_var.set(path)
-
-    def _pick_file(self):
-        mode = self.mode_var.get()
-        if mode == "图片":
-            path = filedialog.askopenfilename(
-                title="选择图片文件",
-                filetypes=[("Images", "*.jpg;*.jpeg;*.png;*.bmp"), ("All Files", "*.*")],
-            )
-        else:
-            path = filedialog.askopenfilename(
-                title="选择视频文件",
-                filetypes=[("Videos", "*.mp4;*.avi;*.mov;*.mkv"), ("All Files", "*.*")],
-            )
-        if path:
-            self.file_var.set(path)
-
-    def _refresh_cameras(self):
-        self.status_var.set("正在扫描摄像头...")
-        self.root.update_idletasks()
-        indices = _enumerate_cameras(max_index=12)
-        values = [str(i) for i in indices]
-        self.camera_combo["values"] = values
-        if values:
-            if self.camera_var.get() not in values:
-                self.camera_var.set(values[0])
-        else:
-            self.camera_var.set("")
-        self.status_var.set("就绪")
-        self._refresh_ui_state()
-
-    def _refresh_ui_state(self):
-        mode = self.mode_var.get()
-        if mode in ("图片", "视频"):
-            self.file_entry.state(["!disabled"])
-            self.pick_btn.state(["!disabled"])
-            self.camera_combo.state(["disabled"])
-        else:
-            self.file_entry.state(["disabled"])
-            self.pick_btn.state(["disabled"])
-            self.camera_combo.state(["!disabled"])
-
-    def _set_running(self, running):
-        if running:
-            self.start_btn.state(["disabled"])
-            self.mode_combo.state(["disabled"])
-            self.pick_btn.state(["disabled"])
-            self.camera_combo.state(["disabled"])
-            self.model_entry.state(["disabled"])
-            self.conf_spin.state(["disabled"])
-        else:
-            self.start_btn.state(["!disabled"])
-            self.mode_combo.state(["readonly"])
-            self.model_entry.state(["!disabled"])
-            self.conf_spin.state(["!disabled"])
-            self._refresh_ui_state()
-
-    def _start(self):
-        mode = self.mode_var.get()
-        model_path = self.model_var.get().strip()
-        conf = float(self.conf_var.get())
-
-        if mode in ("图片", "视频"):
-            source_path = self.file_var.get().strip()
-            if not source_path:
-                messagebox.showerror("错误", "请先选择文件。")
-                return
-        else:
-            source_path = None
-
-        if mode == "摄像头":
-            if not self.camera_var.get().strip():
-                messagebox.showerror("错误", "未找到可用摄像头，请先刷新。")
-                return
-            camera_index = int(self.camera_var.get())
-        else:
-            camera_index = 0
-
-        self._set_running(True)
-        self.status_var.set("运行中...（OpenCV 窗口内按 q 退出）")
-
-        def worker():
+        width = int(capture.get(cv2.CAP_PROP_FRAME_WIDTH))
+        height = int(capture.get(cv2.CAP_PROP_FRAME_HEIGHT))
+        backend_name = "unknown"
+        if hasattr(capture, "getBackendName"):
             try:
-                run_inference(
-                    mode=mode,
-                    source_path=source_path,
-                    camera_index=camera_index,
-                    model_path=model_path,
-                    conf=conf,
-                )
-                self.root.after(0, lambda: self.status_var.set("已结束，报告已生成。"))
-            except Exception as e:
-                self.root.after(0, lambda: messagebox.showerror("运行失败", str(e)))
-                self.root.after(0, lambda: self.status_var.set("失败"))
-            finally:
-                self.root.after(0, lambda: self._set_running(False))
+                backend_name = capture.getBackendName()
+            except Exception:
+                backend_name = "unknown"
 
-        threading.Thread(target=worker, daemon=True).start()
+        camera_infos.append(
+            CameraInfo(
+                index=index,
+                width=width,
+                height=height,
+                backend_name=backend_name,
+            )
+        )
+        capture.release()
 
-def run_gui():
-    root = tk.Tk()
-    ttk.Style().theme_use("clam")
-    _App(root)
-    root.mainloop()
+    return camera_infos
 
-if __name__ == '__main__':
-    run_gui()
+
+def select_camera_index_interactive(camera_infos: list[CameraInfo], use_gui: bool = True) -> int:
+    """
+    作用：
+    在已经探测到的摄像头列表中交互选择目标设备。
+
+    参数：
+    - camera_infos: 当前可用摄像头列表。
+    - use_gui: 是否优先使用图形界面。
+
+    返回：
+    - int: 选中的摄像头索引。
+    """
+
+    if not camera_infos:
+        raise RuntimeError("未探测到可用摄像头，请检查设备连接或调大 --max-camera-probe。")
+
+    option_list = [(str(camera.index), camera.display_name) for camera in camera_infos]
+    selected_index = choose_option_interactive(
+        title="摄像头选择",
+        prompt="请选择要使用的摄像头：",
+        options=option_list,
+        default_value=str(camera_infos[0].index),
+        use_gui=use_gui,
+    )
+    return int(selected_index)
+
+
+def select_camera_resolution_interactive(use_gui: bool = True) -> tuple[int, int] | None:
+    """
+    作用：
+    为摄像头模式交互选择目标分辨率，便于针对 USB 相机直接切换常见档位。
+
+    参数：
+    - use_gui: 是否优先使用图形界面。
+
+    返回：
+    - tuple[int, int] | None: 返回选中的宽高；若保持默认则返回 None。
+    """
+
+    selected_value = choose_option_interactive(
+        title="摄像头分辨率选择",
+        prompt="请选择摄像头工作分辨率：",
+        options=CAMERA_RESOLUTION_PRESETS,
+        default_value="default",
+        use_gui=use_gui,
+    )
+
+    if selected_value == "custom":
+        return ask_custom_resolution_interactive(use_gui=use_gui)
+    return parse_camera_resolution(selected_value)
+
+
+def ask_custom_resolution_interactive(use_gui: bool = True) -> tuple[int, int]:
+    """
+    作用：
+    在预设分辨率之外，允许用户手动输入自定义宽高。
+
+    参数：
+    - use_gui: 是否优先使用图形界面。
+
+    返回：
+    - tuple[int, int]: 用户自定义的宽高分辨率。
+    """
+
+    if use_gui and tk is not None and simpledialog is not None:
+        root = None
+        try:
+            root = create_tk_root()
+            resolution_text = simpledialog.askstring(
+                title="自定义分辨率",
+                prompt='请输入分辨率，格式示例：1920x1080',
+                parent=root,
+            )
+            if resolution_text:
+                parsed_resolution = parse_camera_resolution(resolution_text)
+                if parsed_resolution is None:
+                    raise ValueError("自定义分辨率不能为空。")
+                return parsed_resolution
+        except Exception:
+            pass
+        finally:
+            if root is not None:
+                root.destroy()
+
+    while True:
+        resolution_text = input('请输入自定义分辨率，格式示例：1920x1080：').strip()
+        try:
+            parsed_resolution = parse_camera_resolution(resolution_text)
+            if parsed_resolution is None:
+                print("自定义分辨率不能为空。")
+                continue
+            return parsed_resolution
+        except ValueError as error:
+            print(error)
+
+
+def choose_option_interactive(
+    title: str,
+    prompt: str,
+    options: list[tuple[str, str]],
+    default_value: str,
+    use_gui: bool = True,
+) -> str:
+    """
+    作用：
+    提供一个通用的单选交互入口，供模式选择和摄像头选择复用。
+
+    参数：
+    - title: 弹窗或命令行标题。
+    - prompt: 给用户的选择提示。
+    - options: 候选项列表，格式为 (实际值, 展示文本)。
+    - default_value: 默认选项的实际值。
+    - use_gui: 是否优先使用图形界面。
+
+    返回：
+    - str: 用户最终选中的实际值。
+    """
+
+    if not options:
+        raise ValueError(f"{title} 失败：候选项为空。")
+
+    if use_gui and tk is not None and ttk is not None:
+        try:
+            return choose_option_gui(title, prompt, options, default_value)
+        except Exception:
+            # 图形界面失败时，统一降级为命令行选择，避免脚本中断。
+            pass
+
+    return choose_option_cli(title, prompt, options, default_value)
+
+
+def choose_option_gui(
+    title: str,
+    prompt: str,
+    options: list[tuple[str, str]],
+    default_value: str,
+) -> str:
+    """
+    作用：
+    用 Tk 窗口完成单选项交互。
+
+    参数：
+    - title: 窗口标题。
+    - prompt: 窗口提示文本。
+    - options: 候选项列表。
+    - default_value: 默认值。
+
+    返回：
+    - str: 用户选中的值。
+    """
+
+    if tk is None or ttk is None:
+        raise RuntimeError("当前环境不可用 Tk 图形界面。")
+
+    selected_value = {"value": default_value}
+    window = tk.Tk()
+    window.title(title)
+    window.resizable(False, False)
+    window.attributes("-topmost", True)
+    window.geometry("+500+250")
+
+    ttk.Label(window, text=prompt, padding=(18, 14, 18, 8)).pack(anchor="w")
+
+    radio_value = tk.StringVar(value=default_value)
+    for option_value, option_label in options:
+        ttk.Radiobutton(
+            window,
+            text=option_label,
+            value=option_value,
+            variable=radio_value,
+            padding=(18, 4, 18, 4),
+        ).pack(anchor="w")
+
+    button_frame = ttk.Frame(window, padding=(18, 12, 18, 16))
+    button_frame.pack(fill="x")
+
+    def confirm_selection() -> None:
+        """确认按钮回调：保存当前选项并关闭窗口。"""
+
+        selected_value["value"] = radio_value.get()
+        window.destroy()
+
+    def cancel_selection() -> None:
+        """取消按钮回调：沿用默认值，避免误关闭窗口后出现空结果。"""
+
+        selected_value["value"] = default_value
+        window.destroy()
+
+    ttk.Button(button_frame, text="确定", command=confirm_selection).pack(side="left", padx=(0, 10))
+    ttk.Button(button_frame, text="取消", command=cancel_selection).pack(side="left")
+
+    window.protocol("WM_DELETE_WINDOW", cancel_selection)
+    window.mainloop()
+    return selected_value["value"]
+
+
+def choose_option_cli(
+    title: str,
+    prompt: str,
+    options: list[tuple[str, str]],
+    default_value: str,
+) -> str:
+    """
+    作用：
+    在没有 GUI 时用命令行完成单选项交互。
+
+    参数：
+    - title: 命令行标题。
+    - prompt: 选择提示。
+    - options: 候选项列表。
+    - default_value: 默认值。
+
+    返回：
+    - str: 用户选中的值。
+    """
+
+    print(f"\n{title}")
+    print(prompt)
+    for index, (_, label) in enumerate(options, start=1):
+        print(f"  {index}. {label}")
+
+    option_value_to_index = {value: index for index, (value, _) in enumerate(options, start=1)}
+    default_index = option_value_to_index[default_value]
+
+    while True:
+        user_text = input(f"请输入序号，直接回车默认选择第 {default_index} 项：").strip()
+        if not user_text:
+            return default_value
+        if user_text.isdigit():
+            selected_index = int(user_text)
+            if 1 <= selected_index <= len(options):
+                return options[selected_index - 1][0]
+        print("输入无效，请重新输入。")
+
+
+def build_config_from_args(args: argparse.Namespace) -> InferenceConfig:
+    """
+    作用：
+    将命令行参数和交互式补全整合成最终推理配置。
+
+    参数：
+    - args: 参数解析后的命名空间对象。
+
+    返回：
+    - InferenceConfig: 可直接执行的推理配置。
+    """
+
+    use_gui = not args.no_gui
+
+    # 权重路径优先使用命令行参数；未指定时才进入“自动定位 + 可选手动切换”的交互流程。
+    if args.weight:
+        weight_path = resolve_existing_file(args.weight)
+    elif args.no_prompt:
+        weight_path = find_latest_weight(SCRIPT_DIR)
+    else:
+        weight_path = select_weight_path_interactive(use_gui=use_gui, search_root=SCRIPT_DIR)
+
+    # 模式选择支持命令行直传，也支持交互式选择，方便单次演示和后续脚本调用两种场景共存。
+    if args.mode:
+        mode: InferenceMode = args.mode
+    elif args.no_prompt:
+        raise ValueError("启用 --no-prompt 时必须显式传入 --mode。")
+    else:
+        mode = select_mode_interactive(use_gui=use_gui)
+
+    if mode in {"image", "video"}:
+        if args.source:
+            source: Path | int = resolve_existing_file(args.source)
+        elif args.no_prompt:
+            raise ValueError(f"启用 --no-prompt 且 mode={mode} 时，必须显式传入 --source。")
+        else:
+            source = select_media_path_interactive(mode=mode, use_gui=use_gui)
+        camera_resolution = None
+    else:
+        if args.camera is not None:
+            source = args.camera
+        elif args.no_prompt:
+            source = 0
+        else:
+            camera_infos = probe_camera_indices(args.max_camera_probe)
+            source = select_camera_index_interactive(camera_infos, use_gui=use_gui)
+
+        if args.camera_resolution:
+            camera_resolution = parse_camera_resolution(args.camera_resolution)
+        elif args.no_prompt:
+            camera_resolution = None
+        else:
+            camera_resolution = select_camera_resolution_interactive(use_gui=use_gui)
+
+    project_dir = DEFAULT_PREDICT_PROJECT_DIR
+    if args.project:
+        project_dir = resolve_path(args.project)
+
+    run_name = args.run_name.strip() if args.run_name else build_default_run_name(mode)
+    imgsz = args.imgsz if args.imgsz > 0 else None
+    device = args.device.strip() if args.device.strip() else None
+
+    return InferenceConfig(
+        weight_path=weight_path,
+        mode=mode,
+        source=source,
+        camera_resolution=camera_resolution,
+        conf=args.conf,
+        imgsz=imgsz,
+        device=device,
+        show=not args.noshow,
+        save=not args.nosave,
+        project_dir=project_dir,
+        run_name=run_name,
+    )
+
+
+def print_config_summary(config: InferenceConfig) -> None:
+    """
+    作用：
+    在执行前把当前推理配置打印出来，便于排查“到底用了哪个权重、哪个输入源”的问题。
+
+    参数：
+    - config: 即将执行的推理配置。
+    """
+
+    print("\n当前推理配置：")
+    print(f"  权重文件：{config.weight_path}")
+    print(f"  识别模式：{config.mode}")
+    print(f"  输入源：{config.source_text()}")
+    if config.mode == "camera":
+        if config.camera_resolution is None:
+            print("  摄像头分辨率：保持设备默认")
+        else:
+            print(f"  摄像头分辨率：{config.camera_resolution[0]}x{config.camera_resolution[1]}")
+    print(f"  置信度阈值：{config.conf}")
+    print(f"  推理尺寸：{config.imgsz if config.imgsz else '默认'}")
+    print(f"  推理设备：{config.device if config.device else '自动'}")
+    print(f"  显示窗口：{'开启' if config.show else '关闭'}")
+    print(f"  保存结果：{'开启' if config.save else '关闭'}")
+    if config.save:
+        print(f"  输出目录：{config.project_dir / (config.run_name or build_default_run_name(config.mode))}")
+
+
+def print_summary(summary: InferenceSummary) -> None:
+    """
+    作用：
+    输出本次推理任务的统计结果。
+
+    参数：
+    - summary: 推理完成后的摘要信息。
+    """
+
+    print("\n推理完成：")
+    print(f"  模式：{summary.mode}")
+    print(f"  权重：{summary.weight_path}")
+    print(f"  输入源：{summary.source_text}")
+    print(f"  处理帧数：{summary.frame_count}")
+    print(f"  检测框总数：{summary.detection_count}")
+    if summary.actual_resolution is not None:
+        print(f"  实际分辨率：{summary.actual_resolution[0]}x{summary.actual_resolution[1]}")
+    if summary.save_dir is not None:
+        print(f"  结果目录：{summary.save_dir}")
+
+
+def main() -> None:
+    """
+    作用：
+    脚本主入口，负责解析参数、补全交互信息并执行推理。
+    """
+
+    parser = build_parser()
+    args = parser.parse_args()
+
+    config = build_config_from_args(args)
+    print_config_summary(config)
+
+    inferencer = Yolo26Inferencer(weight_path=config.weight_path, device=config.device)
+    summary = inferencer.run(config)
+    print_summary(summary)
+
+
+if __name__ == "__main__":
+    main()
