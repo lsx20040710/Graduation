@@ -14,9 +14,10 @@ USB 相机标定辅助脚本。
 4. 将导出的参数接入后续 ROS2 图像链路或视觉伺服模块。
 
 命令示例：
-    python calibrate_usb_camera.py capture --cols 10 --rows 7 --width 1920 --height 1080
+    python calibrate_usb_camera.py capture --cols 10 --rows 7 --quality 1080p
+    python calibrate_usb_camera.py capture --cols 10 --rows 7 --width 1280 --height 720
     python calibrate_usb_camera.py calibrate --cols 10 --rows 7 --square-size-mm 20
-    python calibrate_usb_camera.py preview --calibration-file output/camera_calibration.json
+    python calibrate_usb_camera.py preview --calibration-file output/camera_calibration.json --quality 720p
 """
 
 from __future__ import annotations
@@ -37,6 +38,17 @@ import numpy as np
 SCRIPT_DIR = Path(__file__).resolve().parent
 DEFAULT_CAPTURE_DIR = SCRIPT_DIR / "captures"
 DEFAULT_OUTPUT_DIR = SCRIPT_DIR / "output"
+DEFAULT_QUALITY_PRESET = "1080p"
+
+# 统一维护常用画质预设，便于采集和预览脚本共享同一套分辨率命名
+QUALITY_PRESETS: dict[str, tuple[int, int]] = {
+    "480p": (640, 480),
+    "720p": (1280, 720),
+    "900p": (1600, 900),
+    "1080p": (1920, 1080),
+    "1440p": (2560, 1440),
+    "4k": (3840, 2160),
+}
 
 
 @dataclass
@@ -65,6 +77,103 @@ def ensure_dir(path: Path) -> Path:
     """确保目标目录存在，并返回规范化后的目录对象。"""
     path.mkdir(parents=True, exist_ok=True)
     return path
+
+
+def normalize_quality_name(value: str) -> str:
+    """规范化画质预设名称，避免大小写或首尾空格导致匹配失败。"""
+    return value.strip().lower()
+
+
+def build_quality_preset_lines() -> List[str]:
+    """生成可直接打印的画质预设说明，供命令行帮助和 README 复用。"""
+    lines: List[str] = []
+    for name, (width, height) in QUALITY_PRESETS.items():
+        default_tag = "（默认）" if name == DEFAULT_QUALITY_PRESET else ""
+        lines.append(f"  - {name:>5} -> {width}x{height}{default_tag}")
+    return lines
+
+
+def print_quality_presets() -> None:
+    """打印当前支持的画质预设，方便用户快速查看可选档位。"""
+    print("=" * 50)
+    print("当前支持的画质预设")
+    print("-" * 50)
+    for line in build_quality_preset_lines():
+        print(line)
+    print("=" * 50)
+
+
+def add_stream_resolution_arguments(
+    parser: argparse.ArgumentParser,
+    *,
+    width_help: str,
+    height_help: str,
+    fourcc_help: str,
+    allow_list_presets: bool = False,
+) -> None:
+    """为摄像头相关命令补充画质预设、分辨率和像素格式参数。"""
+    parser.add_argument(
+        "--quality",
+        type=normalize_quality_name,
+        choices=tuple(QUALITY_PRESETS.keys()),
+        default=DEFAULT_QUALITY_PRESET,
+        help=f"画质预设，默认 {DEFAULT_QUALITY_PRESET}；未手动指定宽高时按该预设请求分辨率。",
+    )
+    parser.add_argument(
+        "--width",
+        type=int,
+        default=None,
+        help=f"{width_help}；与 --height 同时提供时会覆盖 --quality。",
+    )
+    parser.add_argument(
+        "--height",
+        type=int,
+        default=None,
+        help=f"{height_help}；与 --width 同时提供时会覆盖 --quality。",
+    )
+    parser.add_argument("--fourcc", default="MJPG", help=fourcc_help)
+    if allow_list_presets:
+        parser.add_argument(
+            "--list-quality-presets",
+            action="store_true",
+            help="仅列出当前支持的画质预设，不进入后续相机流程。",
+        )
+
+
+def resolve_stream_resolution(args: argparse.Namespace) -> Tuple[int, int, str]:
+    """解析本次相机输入应请求的分辨率，并把结果回写到参数对象。"""
+    requested_quality = normalize_quality_name(str(getattr(args, "quality", DEFAULT_QUALITY_PRESET) or DEFAULT_QUALITY_PRESET))
+    if requested_quality not in QUALITY_PRESETS:
+        raise ValueError(f"不支持的画质预设: {requested_quality}")
+
+    preset_width, preset_height = QUALITY_PRESETS[requested_quality]
+    raw_width = getattr(args, "width", None)
+    raw_height = getattr(args, "height", None)
+
+    # 默认优先走画质预设；只有用户同时给出宽高时才视为手动覆盖
+    if raw_width is None and raw_height is None:
+        width = preset_width
+        height = preset_height
+        resolution_label = f"{requested_quality} ({width}x{height})"
+    elif raw_width is None or raw_height is None:
+        raise ValueError("手动指定分辨率时必须同时提供 --width 和 --height。")
+    else:
+        width = int(raw_width)
+        height = int(raw_height)
+        if width <= 0 or height <= 0:
+            raise ValueError("手动指定的宽高必须是正整数。")
+
+        # 手动宽高优先级更高，但保留原始预设名称，便于启动信息里说明覆盖关系
+        if (width, height) == (preset_width, preset_height):
+            resolution_label = f"{requested_quality} ({width}x{height})"
+        else:
+            resolution_label = f"自定义 ({width}x{height}，覆盖预设 {requested_quality})"
+
+    args.width = width
+    args.height = height
+    args.resolved_quality = requested_quality
+    args.resolution_label = resolution_label
+    return width, height, resolution_label
 
 
 def list_cameras(max_to_test: int = 5) -> List[int]:
@@ -402,7 +511,13 @@ def build_undistort_maps(
 def run_capture(args: argparse.Namespace) -> int:
     """启动相机采集界面，按空格保存棋盘格图像。"""
     output_dir = ensure_dir(Path(args.output_dir).resolve())
-    cap = open_camera(args.camera_index, args.width, args.height, args.fourcc)
+    try:
+        requested_width, requested_height, resolution_label = resolve_stream_resolution(args)
+    except ValueError as exc:
+        print(f"分辨率参数错误: {exc}", file=sys.stderr)
+        return 1
+
+    cap = open_camera(args.camera_index, requested_width, requested_height, args.fourcc)
     
     if not cap.isOpened():
         print(f"无法打开相机 (索引: {args.camera_index})。", file=sys.stderr)
@@ -432,6 +547,8 @@ def run_capture(args: argparse.Namespace) -> int:
     print("操作指令:")
     print("  [空格] - 当检测到角点时保存当前帧")
     print("  [Q]    - 退出采集程序")
+    print(f"  当前请求画质: {resolution_label}")
+    print(f"  当前请求像素格式: {args.fourcc}")
     print(f"  当前检测缩放比例: {detection_scale:.2f}")
     print(f"  当前检测间隔: 每 {detect_interval} 帧检测一次")
 
@@ -460,7 +577,8 @@ def run_capture(args: argparse.Namespace) -> int:
         status = [
             f"board: {'DETECTED' if last_found else 'not found'}",
             f"saved images: {saved}",
-            f"resolution: {frame.shape[1]}x{frame.shape[0]}",
+            f"request: {requested_width}x{requested_height}",
+            f"actual: {frame.shape[1]}x{frame.shape[0]}",
             f"detect every: {detect_interval} frame(s)",
             "SPACE=save  Q=quit",
         ]
@@ -690,7 +808,17 @@ def run_preview(args: argparse.Namespace) -> int:
         cv2.destroyAllWindows()
         return 0
 
-    cap = open_camera(args.camera_index, args.width, args.height, args.fourcc)
+    try:
+        requested_width, requested_height, resolution_label = resolve_stream_resolution(args)
+    except ValueError as exc:
+        print(f"分辨率参数错误: {exc}", file=sys.stderr)
+        cv2.destroyWindow(window_name)
+        return 1
+
+    print(f"实时预览请求画质: {resolution_label}")
+    print(f"实时预览请求像素格式: {args.fourcc}")
+
+    cap = open_camera(args.camera_index, requested_width, requested_height, args.fourcc)
     if not cap.isOpened():
         print("无法打开预览相机。", file=sys.stderr)
         cv2.destroyWindow(window_name)
@@ -718,6 +846,7 @@ def run_preview(args: argparse.Namespace) -> int:
         display = draw_status(
             display,
             [
+                f"request size: {requested_width}x{requested_height}",
                 f"raw size: {size[0]}x{size[1]}",
                 f"calibrated size: {calibration.image_width}x{calibration.image_height}",
                 f"layout: {layout}",
@@ -749,9 +878,12 @@ def build_parser() -> argparse.ArgumentParser:
     # 采集子命令：从实时相机获取棋盘格图像
     capture = subparsers.add_parser("capture", help="从相机采集棋盘格图像。")
     capture.add_argument("--camera-index", type=int, default=0, help="OpenCV 使用的相机索引。")
-    capture.add_argument("--width", type=int, default=1920, help="请求的采集宽度。")
-    capture.add_argument("--height", type=int, default=1080, help="请求的采集高度。")
-    capture.add_argument("--fourcc", default="MJPG", help="请求的相机像素格式，例如 MJPG。")
+    add_stream_resolution_arguments(
+        capture,
+        width_help="请求的采集宽度",
+        height_help="请求的采集高度",
+        fourcc_help="请求的相机像素格式，例如 MJPG。",
+    )
     capture.add_argument("--cols", type=int, required=True, help="棋盘格内角点列数（宽度方向）。")
     capture.add_argument("--rows", type=int, required=True, help="棋盘格内角点行数（高度方向）。")
     capture.add_argument("--output-dir", default=str(DEFAULT_CAPTURE_DIR), help="保存采集图像的目录。")
@@ -798,9 +930,12 @@ def build_parser() -> argparse.ArgumentParser:
     preview = subparsers.add_parser("preview", help="预览实时或离线去畸变效果。")
     preview.add_argument("--calibration-file", required=True, help="导出的标定结果 JSON 路径。")
     preview.add_argument("--camera-index", type=int, default=0, help="实时预览使用的相机索引。")
-    preview.add_argument("--width", type=int, default=1920, help="请求的预览宽度。")
-    preview.add_argument("--height", type=int, default=1080, help="请求的预览高度。")
-    preview.add_argument("--fourcc", default="MJPG", help="请求的相机像素格式。")
+    add_stream_resolution_arguments(
+        preview,
+        width_help="请求的预览宽度",
+        height_help="请求的预览高度",
+        fourcc_help="请求的相机像素格式。",
+    )
     preview.add_argument("--image", default="", help="预览单张图片；提供后不再打开相机。")
     preview.add_argument(
         "--alpha",

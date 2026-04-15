@@ -4,13 +4,15 @@
 使用方法：
 1. 先查看当前可用摄像头索引：
    python preview_undistort.py --list-cameras
-2. 不确定应该选哪个摄像头时，直接运行脚本并按提示选择：
+2. 查看当前支持的画质档位：
+   python preview_undistort.py --list-quality-presets
+3. 不确定应该选哪个摄像头时，直接运行脚本并按提示选择：
    python preview_undistort.py --calibration-file output/camera_calibration.json
-3. 已知摄像头索引时，直接预览实时去畸变效果：
-   python preview_undistort.py --calibration-file output/camera_calibration.json --camera-index 1
-4. 如果单屏下左右对比图太宽，可以切换为上下布局：
+4. 已知摄像头索引时，直接预览实时去畸变效果：
+   python preview_undistort.py --calibration-file output/camera_calibration.json --camera-index 1 --quality 720p
+5. 如果单屏下左右对比图太宽，可以切换为上下布局：
    python preview_undistort.py --calibration-file output/camera_calibration.json --layout vertical
-5. 如果只想检查某一张图片的去畸变结果：
+6. 如果只想检查某一张图片的去畸变结果：
    python preview_undistort.py --calibration-file output/camera_calibration.json --image test.jpg
 
 预览时的按键说明：
@@ -23,7 +25,7 @@ import argparse
 import sys
 
 # 导入底层去畸变预览函数和摄像头探测函数
-from calibrate_usb_camera import list_cameras, run_preview
+from calibrate_usb_camera import add_stream_resolution_arguments, list_cameras, print_quality_presets, run_preview
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -43,9 +45,13 @@ def build_parser() -> argparse.ArgumentParser:
         help="要打开的 OpenCV 相机索引；不传时会先检测可用摄像头，并让你交互选择。",
     )
     parser.add_argument("--image", default="", help="预览单张图片；提供后将不再打开相机。")
-    parser.add_argument("--width", type=int, default=1920, help="请求的预览宽度（像素）。")
-    parser.add_argument("--height", type=int, default=1080, help="请求的预览高度（像素）。")
-    parser.add_argument("--fourcc", default="MJPG", help="请求的相机像素格式，例如 MJPG。")
+    add_stream_resolution_arguments(
+        parser,
+        width_help="请求的预览宽度（像素）",
+        height_help="请求的预览高度（像素）",
+        fourcc_help="请求的相机像素格式，例如 MJPG。",
+        allow_list_presets=True,
+    )
 
     # 摄像头选择相关参数：用于排查索引错误或设备顺序变化的问题
     parser.add_argument(
@@ -168,6 +174,11 @@ def main() -> int:
     # 仅查看摄像头时直接返回，不要求标定文件存在
     if args.list_cameras:
         print_available_cameras(list_cameras(max_to_test=args.max_test_cameras))
+        return 0
+
+    # 仅查看画质预设时不要求标定文件存在，避免做无关校验
+    if args.list_quality_presets:
+        print_quality_presets()
         return 0
 
     # 进入真正的去畸变预览时必须提供标定文件

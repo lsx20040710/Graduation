@@ -4,14 +4,20 @@
 使用方法：
 1. 先查看当前可用摄像头索引：
    python capture_checkerboard.py --list-cameras
-2. 不确定应该选哪个摄像头时，直接运行脚本并按提示选择：
+2. 先查看当前支持的画质档位：
+   python capture_checkerboard.py --list-quality-presets
+3. 不确定应该选哪个摄像头时，直接运行脚本并按提示选择：
    python capture_checkerboard.py --cols 10 --rows 7
-3. 已知摄像头索引时，直接指定后开始采集：
-   python capture_checkerboard.py --camera-index 1 --cols 10 --rows 7
-4. 如果预览仍然偏卡，可以继续降低角点检测负载：
-   python capture_checkerboard.py --camera-index 1 --cols 10 --rows 7 --preview-scale 0.4 --detect-interval 3
+4. 已知摄像头索引时，直接指定后开始采集：
+   python capture_checkerboard.py --camera-index 1 --cols 10 --rows 7 --quality 720p
+5. 如果预览仍然偏卡，可以继续降低角点检测负载：
+   python capture_checkerboard.py --camera-index 1 --cols 10 --rows 7 --quality 720p --preview-scale 0.4 --detect-interval 3
 
 参数说明：
+- `--quality`
+  画质预设名称，默认是 `1080p`。
+  当前内置预设包括 `480p / 720p / 900p / 1080p / 1440p / 4k`。
+  如果同时传入 `--width` 和 `--height`，则手动宽高优先。
 - `--preview-scale`
   角点检测前的缩放比例，范围建议在 0.1 到 1.0 之间。
   数值越小，检测越快，但角点定位稳定性可能下降。
@@ -30,7 +36,13 @@ import argparse
 import sys
 
 # 导入底层标定工具中的默认保存目录、摄像头探测函数和采集主流程
-from calibrate_usb_camera import DEFAULT_CAPTURE_DIR, list_cameras, run_capture
+from calibrate_usb_camera import (
+    DEFAULT_CAPTURE_DIR,
+    add_stream_resolution_arguments,
+    list_cameras,
+    print_quality_presets,
+    run_capture,
+)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -44,9 +56,13 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="要打开的 OpenCV 相机索引；不传时会先检测可用摄像头，并让你交互选择。",
     )
-    parser.add_argument("--width", type=int, default=1920, help="请求的采集宽度（像素）。")
-    parser.add_argument("--height", type=int, default=1080, help="请求的采集高度（像素）。")
-    parser.add_argument("--fourcc", default="MJPG", help="请求的相机像素格式，例如 MJPG、YUYV。")
+    add_stream_resolution_arguments(
+        parser,
+        width_help="请求的采集宽度（像素）",
+        height_help="请求的采集高度（像素）",
+        fourcc_help="请求的相机像素格式，例如 MJPG、YUYV。",
+        allow_list_presets=True,
+    )
     parser.add_argument(
         "--list-cameras",
         action="store_true",
@@ -183,6 +199,11 @@ def main() -> int:
     # 仅查看摄像头时不进入采集流程，避免误开窗口
     if args.list_cameras:
         print_available_cameras(list_cameras(max_to_test=args.max_test_cameras))
+        return 0
+
+    # 仅查看画质档位时直接返回，便于快速确认当前脚本支持哪些分辨率预设
+    if args.list_quality_presets:
+        print_quality_presets()
         return 0
 
     # 只有真正进入采集流程时，棋盘格规格才是必填参数
