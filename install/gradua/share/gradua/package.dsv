@@ -1,0 +1,6 @@
+source;share/gradua/hook/pythonpath.ps1
+source;share/gradua/hook/pythonpath.dsv
+source;share/gradua/hook/pythonpath.sh
+source;share/gradua/hook/ament_prefix_path.ps1
+source;share/gradua/hook/ament_prefix_path.dsv
+source;share/gradua/hook/ament_prefix_path.sh

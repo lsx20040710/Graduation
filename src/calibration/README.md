@@ -238,3 +238,50 @@ python calibrate_usb_camera.py preview --calibration-file output/camera_calibrat
 - 去畸变和伺服误差估计也会一起受到影响
 
 对这个项目来说，分辨率不是单纯“画质好不好”的问题，而是会影响后续视觉闭环稳定性的一个基础配置项。
+
+---
+
+## 8. ROS2 运行期接入说明
+
+当前 `src/calibration` 目录仍然只负责离线标定，不负责 ROS2 运行期图像话题处理。
+
+也就是说，本目录下的：
+
+- `calibrate_checkerboard.py`
+- `calibrate_usb_camera.py`
+- `preview_undistort.py`
+
+主要用途仍然是：
+
+- 采集棋盘格
+- 计算相机内参与畸变系数
+- 导出 `camera_info.yaml`
+- 本地预览去畸变效果
+
+如果你在 Ubuntu + ROS2 环境中已经安装了 `ros-humble-usb-cam`，建议把运行期图像链路交给新增的 `src/vision_bringup` 包，而不是把这里的本地 OpenCV 预览脚本改成 ROS2 节点。
+
+推荐链路如下：
+
+```text
+usb_cam -> /camera/image_raw + /camera/camera_info
+        -> image_proc::RectifyNode
+        -> /camera/image_rect
+        -> 下游检测 / 视觉伺服
+```
+
+这样划分后，职责边界会更清楚：
+
+- Windows 端：更新 `src/calibration/output/camera_info.yaml`
+- Ubuntu 端：使用 `vision_bringup` 启动 `usb_cam` 和运行期正畸
+
+ROS2 运行命令请查看：
+
+- `src/vision_bringup/README.md`
+
+这也是当前更适合本课题的做法，因为视觉伺服链路真正关心的是：
+
+- 原始图像是否稳定进入 ROS2
+- 标定参数是否伴随图像一起发布
+- 正畸后的图像是否能继续送入检测和控制节点
+
+而不是在运行时重复走一套独立的 OpenCV 本地窗口预览流程。
