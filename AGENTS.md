@@ -78,7 +78,7 @@ When inspecting code, always identify:
 
 ## Vision assumptions
 
-Current validation hardware may use a single USB camera.
+Current validation hardware use a single USB camera.
 Therefore:
 - do not assume a full stereo 3D perception stack unless explicitly provided
 - image coordinates may be the main visual input
