@@ -1,0 +1,41 @@
+[0.321s] Invoking command in '/home/lsx/Graduation/src/Gradua': PYTHONPATH=/home/lsx/Graduation/build/gradua/prefix_override:/usr/lib/python3/dist-packages/colcon_core/task/python/colcon_distutils_commands:/home/lsx/Graduation/install/gradua/lib/python3.10/site-packages:${PYTHONPATH} /usr/bin/python3 -W ignore:setup.py install is deprecated -W ignore:easy_install command is deprecated setup.py egg_info --egg-base ../../build/gradua build --build-base /home/lsx/Graduation/build/gradua/build install --record /home/lsx/Graduation/build/gradua/install.log --single-version-externally-managed install_data
+[0.443s] running egg_info
+[0.443s] creating ../../build/gradua/gradua.egg-info
+[0.444s] writing ../../build/gradua/gradua.egg-info/PKG-INFO
+[0.444s] writing dependency_links to ../../build/gradua/gradua.egg-info/dependency_links.txt
+[0.444s] writing entry points to ../../build/gradua/gradua.egg-info/entry_points.txt
+[0.444s] writing requirements to ../../build/gradua/gradua.egg-info/requires.txt
+[0.444s] writing top-level names to ../../build/gradua/gradua.egg-info/top_level.txt
+[0.444s] writing manifest file '../../build/gradua/gradua.egg-info/SOURCES.txt'
+[0.445s] reading manifest file '../../build/gradua/gradua.egg-info/SOURCES.txt'
+[0.445s] writing manifest file '../../build/gradua/gradua.egg-info/SOURCES.txt'
+[0.445s] running build
+[0.445s] running build_py
+[0.445s] creating /home/lsx/Graduation/build/gradua/build
+[0.445s] creating /home/lsx/Graduation/build/gradua/build/lib
+[0.445s] creating /home/lsx/Graduation/build/gradua/build/lib/gradua
+[0.445s] copying gradua/fast_undistort.py -> /home/lsx/Graduation/build/gradua/build/lib/gradua
+[0.445s] copying gradua/__init__.py -> /home/lsx/Graduation/build/gradua/build/lib/gradua
+[0.445s] copying gradua/undistort_preview_node.py -> /home/lsx/Graduation/build/gradua/build/lib/gradua
+[0.445s] running install
+[0.446s] running install_lib
+[0.446s] creating /home/lsx/Graduation/install/gradua/lib/python3.10/site-packages/gradua
+[0.446s] copying /home/lsx/Graduation/build/gradua/build/lib/gradua/fast_undistort.py -> /home/lsx/Graduation/install/gradua/lib/python3.10/site-packages/gradua
+[0.446s] copying /home/lsx/Graduation/build/gradua/build/lib/gradua/__init__.py -> /home/lsx/Graduation/install/gradua/lib/python3.10/site-packages/gradua
+[0.446s] copying /home/lsx/Graduation/build/gradua/build/lib/gradua/undistort_preview_node.py -> /home/lsx/Graduation/install/gradua/lib/python3.10/site-packages/gradua
+[0.446s] byte-compiling /home/lsx/Graduation/install/gradua/lib/python3.10/site-packages/gradua/fast_undistort.py to fast_undistort.cpython-310.pyc
+[0.447s] byte-compiling /home/lsx/Graduation/install/gradua/lib/python3.10/site-packages/gradua/__init__.py to __init__.cpython-310.pyc
+[0.447s] byte-compiling /home/lsx/Graduation/install/gradua/lib/python3.10/site-packages/gradua/undistort_preview_node.py to undistort_preview_node.cpython-310.pyc
+[0.447s] running install_data
+[0.447s] creating /home/lsx/Graduation/install/gradua/share/ament_index
+[0.448s] creating /home/lsx/Graduation/install/gradua/share/ament_index/resource_index
+[0.448s] creating /home/lsx/Graduation/install/gradua/share/ament_index/resource_index/packages
+[0.448s] copying resource/gradua -> /home/lsx/Graduation/install/gradua/share/ament_index/resource_index/packages
+[0.448s] copying package.xml -> /home/lsx/Graduation/install/gradua/share/gradua
+[0.448s] running install_egg_info
+[0.449s] Copying ../../build/gradua/gradua.egg-info to /home/lsx/Graduation/install/gradua/lib/python3.10/site-packages/gradua-0.0.1-py3.10.egg-info
+[0.457s] running install_scripts
+[0.470s] Installing fast_undistort script to /home/lsx/Graduation/install/gradua/lib/gradua
+[0.470s] Installing undistort_preview script to /home/lsx/Graduation/install/gradua/lib/gradua
+[0.470s] writing list of installed files to '/home/lsx/Graduation/build/gradua/install.log'
+[0.485s] Invoked command in '/home/lsx/Graduation/src/Gradua' returned '0': PYTHONPATH=/home/lsx/Graduation/build/gradua/prefix_override:/usr/lib/python3/dist-packages/colcon_core/task/python/colcon_distutils_commands:/home/lsx/Graduation/install/gradua/lib/python3.10/site-packages:${PYTHONPATH} /usr/bin/python3 -W ignore:setup.py install is deprecated -W ignore:easy_install command is deprecated setup.py egg_info --egg-base ../../build/gradua build --build-base /home/lsx/Graduation/build/gradua/build install --record /home/lsx/Graduation/build/gradua/install.log --single-version-externally-managed install_data

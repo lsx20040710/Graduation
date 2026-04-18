@@ -8,6 +8,7 @@
 
 import rclpy                            # ROS2 Python接口库
 from rclpy.node import Node             # ROS2 节点类
+from rclpy.executors import ExternalShutdownException
 from sensor_msgs.msg import Image       # 图像消息类型
 from cv_bridge import CvBridge          # ROS与OpenCV图像转换类
 import cv2                              # Opencv图像处理库
@@ -33,6 +34,14 @@ class ImageSubscriber(Node):
 def main(args=None):                                        # ROS2节点主入口main函数
     rclpy.init(args=args)                                   # ROS2 Python接口初始化
     node = ImageSubscriber("topic_webcam_sub")              # 创建ROS2节点对象并进行初始化
-    rclpy.spin(node)                                        # 循环等待ROS2退出
-    node.destroy_node()                                     # 销毁节点对象
-    rclpy.shutdown()                                        # 关闭ROS2 Python接口
+    try:
+        rclpy.spin(node)                                    # 循环等待ROS2退出
+    except (KeyboardInterrupt, ExternalShutdownException):
+        pass
+    finally:
+        node.destroy_node()                                 # 销毁节点对象
+        try:
+            rclpy.shutdown()                                # 关闭ROS2 Python接口
+        except Exception:
+            pass
+        cv2.destroyAllWindows()

@@ -1,1 +1,1 @@
-cv_bridge:launch:launch_ros:python3-numpy:python3-opencv:rcl_interfaces:rclpy:sensor_msgs
+cv_bridge:python3-numpy:python3-opencv:rclpy:sensor_msgs

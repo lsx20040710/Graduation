@@ -1,5 +1,4 @@
 [console_scripts]
-camera_preview = gradua.camera_preview_node:main
 fast_undistort = gradua.fast_undistort:main
 undistort_preview = gradua.undistort_preview_node:main
 

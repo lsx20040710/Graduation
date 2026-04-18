@@ -9,9 +9,6 @@ setup.py
 ../../build/gradua/gradua.egg-info/top_level.txt
 ../../build/gradua/gradua.egg-info/zip-safe
 gradua/__init__.py
-gradua/camera_preview_node.py
 gradua/fast_undistort.py
 gradua/undistort_preview_node.py
-launch/camera_preview.launch.py
-launch/undistort_preview.launch.py
 resource/gradua
