@@ -1,8 +1,9 @@
 """
-海参目标检测推理脚本（简练优化版）
-- 保留轻便的图形界面交互（选择权重、模式、文件路径）
-- 与去畸变核心逻辑(preview_raw_camera.py)联动，使得送入YOLO和呈现的画面直接就是正畸后的物理还原画面
-- 舍弃了原来高达上千行的过度工程化设计，直接运用 YOLO 与 OpenCV 原生强大特性
+海参目标检测与追踪推理脚本（视觉伺服初探版）
+- 保留轻便的图形界面交互
+- 与去畸变核心逻辑(preview_raw_camera.py)联动，获得物理级无失真画面
+- 加入卡尔曼滤波帧间目标 Tracking，锁定 ID 避免画面闪烁
+- 直接渲染相机屏幕中心基准线和目标中心点，实时导出坐标偏置 (errX, errY) 准备对接串口伺服
 """
 import os
 import sys
@@ -97,18 +98,30 @@ def gui_select_media(mode):
     return path
 
 
-# ================= 2. 核心推理链路 =================
+# ================= 2. 核心跟踪推理链路 =================
 
 def run_file_inference(model, file_path):
-    """运用 Ultralytics 原生的接口完成文件（图片/视频）推理，自动包含显示和归档结果特性"""
+    """运用 Ultralytics 原生的 track 接口完成文件（图片/视频）稳定推理追踪"""
     print(f"\n>> 正在分析文件: {file_path}")
-    model.predict(source=str(file_path), show=True, save=True, project=str(SCRIPT_DIR / "runs" / "predict"))
-    print(">> 分析完成！如果是视频会在播放完毕后结束，结果已自动保存。")
+    
+    # 图片文件直接使用原生自带接口即可，因为它不需要动态准星
+    if str(file_path).lower().endswith(('.jpg', '.jpeg', '.png', '.bmp', '.webp')):
+        model.track(source=str(file_path), show=True, save=True, persist=True, tracker="bytetrack.yaml", project=str(SCRIPT_DIR / "runs" / "predict"))
+        print(">> 图片分析完成！如果没报错的话结果已自动保存。")
+        return
+
+    # 视频流则和摄像头一样提取出来，接入自绘视觉伺服十字准星的逻辑
+    cap = cv2.VideoCapture(str(file_path))
+    if not cap.isOpened():
+        print(f"无法读取视频文件: {file_path}")
+        return
+    run_servo_tracking_loop(model, cap, is_camera=False, fps_delay=30)  # 为了视频不快进增加一个默认延迟
+
 
 def run_camera_inference(model):
     """
-    针对摄像头的底层控制链路：
-    将相机硬件画面提取后 -> 利用物理标定JSON运算前馈拉伸去畸变 -> 再进入模型寻常目标推测，只生成一个闭环监测窗口不弹两个
+    针对摄像头的底层控制预演链路：
+    将相机硬件画面提取后 -> 标定矩阵去畸变 -> Track获取稳定跟踪框 -> 结算与画面中心的误差 -> 生成指令基础
     """
     root = create_tk_root()
     idx_str = simpledialog.askstring("选择摄像头", "请输入 USB 摄像头索引(如 0 或 1):", initialvalue="1", parent=root)
@@ -125,14 +138,11 @@ def run_camera_inference(model):
         print(f"\n[错误] 无法建立连接！请确认摄像头是否拔插稳妥，且索引号（{camera_idx}）正确。")
         return
         
-    # 为满足此前鱼眼相机标定参数(1080p)的像素点映射规格，我们强制锁为1080p
-    # 注意，如果你的相机不是1080p，该逻辑会自动无缝回退原画
     target_w, target_h = 1920, 1080
     cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*'MJPG'))
     cap.set(cv2.CAP_PROP_FRAME_WIDTH, target_w)
     cap.set(cv2.CAP_PROP_FRAME_HEIGHT, target_h)
 
-    # 尝试加载物理相机的去畸变鱼眼网格
     json_path = SCRIPT_DIR.parent / 'calibration' / 'output' / 'camera_calibration.json'
     map1, map2 = None, None
     if json_path.exists() and load_fisheye_maps is not None:
@@ -141,6 +151,11 @@ def run_camera_inference(model):
     else:
         print("\n[系统提醒] 尚未完成硬件内参标定或数据不互通，退化为原始畸变视野...")
 
+    run_servo_tracking_loop(model, cap, is_camera=True, map1=map1, map2=map2, fps_delay=1)
+
+def run_servo_tracking_loop(model, cap, is_camera=True, map1=None, map2=None, fps_delay=1):
+    """提取的通用识别控制循环（支持视频流和摄像头流）"""
+    
     print("\n>> 视觉伺服窗口已开启，请将焦点定在画面按 'q' 或 'Esc' 中止。")
     
     # 允许自由拉伸窗口尺寸，并给定一个不那么占地方的初始分辨率
@@ -159,15 +174,47 @@ def run_camera_inference(model):
 
         # ====== 步骤1：物理硬件畸变消除运算 ======
         if map1 is not None and map2 is not None:
-            # 双线性插值重绘像素
             frame = cv2.remap(frame, map1, map2, interpolation=cv2.INTER_LINEAR, borderMode=cv2.BORDER_CONSTANT)
 
-        # ====== 步骤2：神经网高频检测 ======
-        # 设置 verbose=False 是为了不让终端刷屏导致卡顿
-        results = model.predict(source=frame, conf=0.25, verbose=False)
+        # 缓存当前画面的物理中心 (基准点)
+        frame_h, frame_w = frame.shape[:2]
+        center_x, center_y = frame_w // 2, frame_h // 2
+
+        # ====== 步骤2：目标稳定检测与帧间 Tracking ======
+        # persist=True 保障帧间卡尔曼滤波关联，能够极大缓解因水下浑浊造成某一帧漏检或框急剧跳动
+        results = model.track(source=frame, conf=0.3, persist=True, tracker="bytetrack.yaml", verbose=False)
         annotated_frame = results[0].plot()
 
-        # 每隔半秒平滑刷新一次 FPS 数字
+        # ====== 步骤3：在画面中心打上参考准星靶心 ======
+        # 画绿色的相机中心十字准星
+        cv2.line(annotated_frame, (center_x - 30, center_y), (center_x + 30, center_y), (0, 255, 0), 2)
+        cv2.line(annotated_frame, (center_x, center_y - 30), (center_x, center_y + 30), (0, 255, 0), 2)
+
+        # ====== 步骤4：找出离中心最近或最稳定的目标，提取并绘制 Error ======
+        if results[0].boxes is not None and len(results[0].boxes) > 0:
+            # 找到首个（置信度高或追踪最稳）的锁定海参靶标
+            box = results[0].boxes[0]
+            x1, y1, x2, y2 = box.xyxy[0].cpu().numpy()
+            
+            # 计算目标的质心位置
+            obj_cx = int((x1 + x2) / 2)
+            obj_cy = int((y1 + y2) / 2)
+            
+            # 视觉伺服中最重要的解：计算图像平面中的偏移量 e = [ex, ey]
+            # y 轴向上为正方向计算：
+            err_x = obj_cx - center_x
+            err_y = center_y - obj_cy
+            
+            # 画一个显眼的红色圆点在海参肚子正中央
+            cv2.circle(annotated_frame, (obj_cx, obj_cy), 8, (0, 0, 255), -1)
+            # 在中心和海参之间拉一条红线，直观表现出相差的距离向量
+            cv2.line(annotated_frame, (center_x, center_y), (obj_cx, obj_cy), (0, 0, 255), 3)
+            
+            # 在准星旁边印出数据
+            err_text = f"Target Error -> dx: {err_x} px, dy: {err_y} px"
+            cv2.putText(annotated_frame, err_text, (center_x + 10, center_y - 15), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 0, 255), 2)
+
+        # ====== 杂项：FPS状态渲染 ======
         frame_count += 1
         curr_time = time.time()
         if curr_time - prev_time >= 0.5:
@@ -175,19 +222,18 @@ def run_camera_inference(model):
             prev_time = curr_time
             frame_count = 0
 
-        # 添加左上角标签明确显示当前的流状态
-        status_text = "Undistorted Camera" if map1 is not None else "Raw Fisheye Camera"
-        status_color = (0, 200, 0) if map1 is not None else (0, 100, 255)
+        status_text = "Undistorted Tracking" if map1 is not None else ("Raw Fisheye Tracking" if is_camera else "Video Tracking")
+        status_color = (0, 200, 0) if map1 is not None else ((0, 100, 255) if is_camera else (255, 100, 0))
         cv2.putText(annotated_frame, status_text, (20, 40), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 0), 4)
         cv2.putText(annotated_frame, status_text, (20, 40), cv2.FONT_HERSHEY_SIMPLEX, 1, status_color, 2)
         
-        # 绘制实时运算拉伸+推断的帧数
         cv2.putText(annotated_frame, f"FPS: {fps_display:.1f}", (20, 80), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 0), 4)
         cv2.putText(annotated_frame, f"FPS: {fps_display:.1f}", (20, 80), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 255), 2)
         
         cv2.imshow("YOLO Visual Servo Local View", annotated_frame)
         
-        if cv2.waitKey(1) & 0xFF in [ord('q'), 27]:
+        # 针对视频如果过快，延缓帧数；对摄像头则设为最小1ms
+        if cv2.waitKey(int(fps_delay)) & 0xFF in [ord('q'), 27]:
             break
 
     cap.release()

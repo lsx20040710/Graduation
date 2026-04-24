@@ -2,30 +2,41 @@
 
 ## Project identity
 
-This repository is for an undergraduate thesis project:
-"Visual servo control for a retractable suction device on a sea cucumber harvesting robot".
+This repository is for an undergraduate thesis project focused on:
+"Visual servo control for a rope-driven soft robot used in sea cucumber harvesting experiments".
 
-The core of this project is NOT a generic object detection demo,
-NOT a full AUV autonomy project,
-and NOT a standard 6-DOF industrial manipulator project.
+The current implementation target is:
+- a two-joint rope-driven soft robot
+- six servos directly controlled by a PC through USB/TTL
+- one USB camera for visual feedback
+- a closed loop from image error to servo command and robot response
 
-The project should always be understood as:
-a vision-servo control system for a retractable suction end-effector
-used in underwater sea cucumber harvesting.
+This project should NOT be treated as:
+- a generic object detection demo
+- a ROS2-first software stack at the current stage
+- an STM32 lower-controller project at the current stage
+- a standard 6-DOF rigid industrial manipulator project
+
+The robot structure should currently be understood as:
+- each joint is composed of three units
+- each joint is driven by three tendons
+- the full robot has two joints and six tendons in total
+- the current mechanism references `DewiEtAl-2024-TendonDrivenContinuumRobot-ModularStiffness-ZHTranslation.pdf.pdf`
+  conceptually, but is modified and scaled for this project
 
 ## Primary goals
 
 When analyzing, modifying, or generating code, always prioritize:
 
 1. Building or improving a closed-loop pipeline:
-   visual detection -> target information -> servo control -> actuator command -> execution feedback
+   visual detection -> image-space target error -> six-servo command -> rope-driven soft robot response -> execution feedback
 
 2. Preserving project structure and existing module boundaries whenever possible
 
-3. Making the system runnable, debuggable, and easy to integrate
+3. Making the system runnable, debuggable, and easy to integrate on the current PC + USB/TTL hardware path
 
-4. Ensuring the code fits the kinematic and control characteristics of a retractable suction device,
-   rather than assuming a traditional rigid industrial robot arm
+4. Ensuring the code fits the kinematic and control characteristics of a two-joint, three-tendon-per-joint soft robot,
+   rather than assuming a rigid serial manipulator
 
 ## Research and reference policy
 
@@ -59,26 +70,32 @@ All generated code must follow these rules:
 7. Do not silently change architecture without strong reason
 8. When editing existing code, preserve original style where reasonable while improving clarity
 
-## ROS2 / control understanding
+## Current system understanding
 
-This project uses a layered architecture.
+At the current stage, the mainline architecture is:
 
 Top layer:
-- ROS2 nodes for vision, target message publishing, servo logic, and command dispatch
+- PC-side visual processing
+- target extraction and image-error computation
+- servo command generation
 
-Bottom layer:
-- hardware execution for retractable actuation and suction-device-related motion control
+Execution layer:
+- USB/TTL serial connection
+- six servo motors driving six tendons
+- two-joint rope-driven soft robot motion response
+
+`src/Gradua` contains a ROS package and should be treated as a future improvement reserve,
+not as a current architecture requirement.
 
 When inspecting code, always identify:
-- node input/output relationships
-- how visual results are passed into control
-- what the controller outputs (position, velocity, PWM, displacement, etc.)
-- where upper-lower layer interfaces are
-- whether the current code is truly closed-loop or only partially connected
+- how visual results are converted into controllable error variables
+- how error variables are mapped to servo IDs, tendon actions, or joint-level control quantities
+- what safety limits exist for servo command size, rate, and coordination
+- whether the current code is truly closed-loop or only computes visual offsets without actuator execution
 
 ## Vision assumptions
 
-Current validation hardware use a single USB camera.
+Current validation hardware uses a single USB camera.
 Therefore:
 - do not assume a full stereo 3D perception stack unless explicitly provided
 - image coordinates may be the main visual input
@@ -87,13 +104,13 @@ Therefore:
 
 ## Control assumptions
 
-The actuator is closer to a retractable / small-range pose-adjustment mechanism
-than to a general-purpose 6-DOF manipulator.
+The actuator system is currently closer to a rope-driven soft robot than to a general-purpose rigid manipulator.
 
 Therefore:
 - do not default to standard industrial arm templates
 - do not introduce full manipulator planning stacks unless necessary
-- respect the coupling between visual error and retractable actuator motion
+- respect the coupling between visual error, tendon actuation, and soft-body deformation
+- prefer practical mappings from image error to six-servo control quantities that are easy to test and revise
 
 ## Output behavior
 
@@ -121,7 +138,7 @@ When asked to write thesis-related material:
 
 If requirements are ambiguous:
 - do not invent hardware capabilities
-- do not assume unavailable sensors or actuators
+- do not assume ROS2 or STM32 are part of the current implementation unless explicitly requested
 - do not claim an experiment has been validated if only code-level reasoning was performed
 
 Instead:

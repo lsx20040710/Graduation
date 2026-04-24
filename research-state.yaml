@@ -1,68 +1,68 @@
 # 研究状态总表
 # 作用：
 # - 统一记录课题问题、文献入口、假设、实验轨迹与当前方向
-# - 作为后续 autoresearch / 论文写作 / 实验整理的共享状态文件
+# - 作为后续论文写作、实验整理与阶段总结的共享状态文件
 
 project:
-  title: "海参捕捞机器人可伸缩吸取装置视觉伺服控制研究"
-  question: "在单目 USB 相机、YOLO 海参检测、ROS2 上位机与 STM32 下位机分层架构约束下，如何构建从视觉误差到可伸缩吸取装置执行命令的稳定闭环，并用对准误差、响应时间和吸取成功率验证其有效性？"
+  title: "海参采捕场景下双关节六绳驱动软体机器人视觉伺服控制研究"
+  question: "在单目 USB 相机、YOLO 海参检测和电脑通过 USB/TTL 直控六个舵机的约束下，如何为双关节六绳驱动软体机器人构建从图像误差到拉索控制量的稳定闭环，并用对准误差、响应时间和动作稳定性验证其有效性？"
   status: active
   started: "2026-04-15"
-  domain: "水下海参捕捞中的视觉伺服与可伸缩吸取执行机构控制"
+  domain: "海参采捕实验中的绳驱软体机器人视觉伺服控制"
 
 literature:
   key_papers:
-    - id: "yu2024hybrid_visual_servoing"
-      title: "Hybrid Visual Servoing with MPC Trajectory Smoothing"
-      authors: "Yu Wenhui et al."
-      year: 2024
-      relevance: "可作为视觉伺服控制律和轨迹平滑设计参考，但需要按单目感知与小行程执行器约束做简化适配。"
     - id: "dewi2024continuum_robot"
       title: "Tendon-Driven Continuum Robot with Modular Stiffness"
       authors: "Dewi et al."
       year: 2024
-      relevance: "可为柔顺/连续体执行机构建模提供思路，但本课题应提炼与小范围伸缩吸取装置相关的部分，不直接套用连续机械臂框架。"
+      relevance: "当前机构设计最直接的参考来源。项目基于其模块化连续体关节思路做放大和改型，但从四绳单关节改成了三绳单关节、双关节六绳驱动。"
+    - id: "yu2024hybrid_visual_servoing"
+      title: "Hybrid Visual Servoing with MPC Trajectory Smoothing"
+      authors: "Yu Wenhui et al."
+      year: 2024
+      relevance: "可作为视觉误差闭环组织、控制平滑和评价指标设计参考，但需要按单目感知和软体机器人驱动约束做简化适配。"
     - id: "feng2023underwater_continuum_control"
       title: "Underwater Rope-Driven Continuum Manipulator Control"
       authors: "Feng Jiaqi et al."
       year: 2023
-      relevance: "可用于参考水下执行机构控制与实验组织方式，但需要避免把本系统写成通用水下连续机械臂。"
+      relevance: "可用于参考水下绳驱执行机构的实验组织和误差分析写法，但不能直接套用其控制结构。"
     - id: "zeng2022visual_servoing_impedance"
       title: "Aerial Manipulator Visual Servoing and Impedance Grasping"
       authors: "Zeng Hongjie et al."
       year: 2022
-      relevance: "可参考视觉误差到执行器控制输入的闭环组织方式，但硬件对象与海参吸取装置不同，只能借鉴控制结构。"
+      relevance: "可借鉴视觉误差到执行器控制输入的闭环表达方式，但硬件对象与当前软体机器人不同。"
   open_problems:
-    - "当前仓库已经具备相机标定、海参检测训练与推理基础，但视觉结果如何进入执行器控制仍未形成完整闭环说明。"
-    - "现阶段验证硬件更接近单目相机加小行程可伸缩机构，需要优先构建可运行的图像平面闭环，而不是假设完整 6 自由度机械臂。"
-    - "检测输出存在水下噪声、目标抖动和置信度波动，若不做时序稳定化，执行器命令容易振荡。"
+    - "当前仓库已经具备相机标定、海参检测训练与推理基础，但视觉结果如何映射到六个舵机的拉索控制量仍未形成统一实现。"
+    - "双关节六绳驱动结构存在关节耦合和软体形变影响，需要先建立可实验验证的简化控制关系，而不是直接追求完整连续体建模。"
+    - "检测输出存在噪声、目标抖动和置信度波动，若不做时序稳定化和指令限幅，六舵机联动容易出现拉索互相牵制或振荡。"
   evidence_gaps:
-    - "缺少当前闭环基线：尚未在仓库根层明确目标误差、对准时间、吸取成功率等指标的基准值。"
-    - "缺少控制链路落地记录：ROS2 节点、消息流、STM32 接口与执行反馈关系还没有整理成统一说明。"
-    - "缺少实验台记录：现有项目文件中还没有把静态对准、动态跟踪和吸取验证整理成实验计划。"
+    - "缺少当前闭环基线：尚未在仓库根层明确目标误差、对准时间、动作稳定性等指标的基准值。"
+    - "缺少六舵机控制链路说明：舵机编号、拉索对应关系、关节分工和控制限幅逻辑还没有整理成统一文档。"
+    - "缺少实验台记录：现有项目文件中还没有把静态对准、动态跟踪和双关节联动验证整理成实验计划。"
 
 hypotheses:
   - id: H1
-    statement: "基于图像平面误差的简化 IBVS 闭环，足以支撑当前单目相机条件下的海参目标对准。"
+    statement: "基于图像平面误差的简化 IBVS 闭环，足以支撑当前单目相机条件下的目标对准实验。"
     status: pending
-    motivation: "仓库已有标定与检测基础，优先验证从目标中心偏差到伸缩机构修正量的最小闭环，比直接构建复杂三维位姿控制更贴近现有硬件。"
+    motivation: "仓库已有标定与检测基础，优先验证从目标中心偏差到双关节六绳驱动修正量的最小闭环，比直接构建高自由度连续体模型更贴近现有硬件。"
     parent: null
     priority: high
   - id: H2
-    statement: "在控制前对检测框中心进行时序滤波与目标有效性判定，可以显著降低执行器抖动。"
+    statement: "在控制前对检测框中心进行时序滤波，并对六舵机指令加入分级限幅和协调约束，可以显著降低动作抖动。"
     status: pending
-    motivation: "水下图像与检测置信度波动会直接传导到控制输出，若不抑制抖动，伸缩吸取动作难以稳定。"
+    motivation: "单目检测抖动会直接传导到拉索控制，若不抑制噪声和联动过冲，双关节软体机构很难稳定响应。"
     parent: null
     priority: high
   - id: H3
-    statement: "采用 ROS2 负责感知与伺服计算、STM32 负责底层位移与吸取执行的分层架构，是当前系统最可落地的闭环实现方案。"
+    statement: "采用电脑通过 USB/TTL 直接控制六个舵机，是当前系统最现实、最易调试的实验实现路径。"
     status: pending
-    motivation: "项目已有明确的上位机/下位机分层意图，需要把接口边界、反馈路径和控制周期固定下来，便于工程集成与论文表述。"
+    motivation: "现阶段目标是先打通视觉误差到拉索执行的最小闭环，ROS 包保留为后续改进储备，但不作为当前实现前提。"
     parent: null
     priority: high
 
 experiments:
-  proxy_metric: "目标中心像素误差、对准完成时间、吸取成功率、闭环过程中的抖动幅值"
+  proxy_metric: "目标中心像素误差、对准完成时间、动作抖动幅值、六舵机控制平滑性"
   baseline_value: null
   best_value: null
   total_runs: 0
@@ -71,7 +71,7 @@ experiments:
 outer_loop:
   cycle: 0
   last_direction: null
-  last_reflection: "初始启动阶段：先补齐研究状态、文献入口和最小闭环假设，再进入实验规划。"
+  last_reflection: "方向调整阶段：主线已从 ROS2/STM32 分层转向电脑直控六舵机的绳驱软体机器人实验平台，后续优先补齐控制映射和实验基线。"
 
 workspace:
   findings: "findings.md"

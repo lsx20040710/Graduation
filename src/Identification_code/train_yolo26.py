@@ -61,7 +61,6 @@ def main():
         batch=args.batch,
         device=device,
         workers=args.workers,
-        project="runs/detect", # 存放结果的根路径
         name=args.run_name,
         patience=30,           # 早停防止过拟合
         plots=True,            # 输出验证集图表，方便观察性能
