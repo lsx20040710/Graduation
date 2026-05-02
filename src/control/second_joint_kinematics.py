@@ -10,11 +10,28 @@ R_W = 6.5       # 绕线轮半径 (mm)
 
 # ==========================================
 # 驱动绳极角位置定义 (数学逆时针正方向, 弧度)
-# 基坐标系 +x 轴沿支撑线1方向
+# 基坐标系 +y 轴沿点一/1号舵机方向，直接对齐当前相机 +y 正方向。
+# 俯视顺时针角 beta 转为代码数学角 alpha 的关系：alpha = 90° - beta。
 # ==========================================
-ALPHA_4 = 40.0 * math.pi / 180.0     # 绳4：40度 = 2π/9 rad
-ALPHA_5 = -80.0 * math.pi / 180.0    # 绳5：-80度 = -4π/9 rad
-ALPHA_6 = 160.0 * math.pi / 180.0    # 绳6：160度 = 8π/9 rad
+POINT1_MATH_ANGLE_DEG = 90.0
+
+
+def _clockwise_to_math_angle(beta_deg):
+    """
+    将机械俯视顺时针角转换为代码使用的数学角。
+    输入 beta_deg 以点一方向为 0°，输出 rad，并归一化到 (-180°, 180°] 便于调试打印。
+    """
+    alpha_deg = POINT1_MATH_ANGLE_DEG - beta_deg
+    while alpha_deg <= -180.0:
+        alpha_deg += 360.0
+    while alpha_deg > 180.0:
+        alpha_deg -= 360.0
+    return math.radians(alpha_deg)
+
+
+ALPHA_4 = _clockwise_to_math_angle(40.0)     # 绳4：点四俯视顺时针40° -> 数学角50°
+ALPHA_5 = _clockwise_to_math_angle(160.0)    # 绳5：点五俯视顺时针160° -> 数学角-70°
+ALPHA_6 = _clockwise_to_math_angle(280.0)    # 绳6：点六俯视顺时针280° -> 数学角170°
 
 # ==========================================
 # 柔性机构补偿参数 (非对称收放策略)
@@ -181,7 +198,7 @@ if __name__ == '__main__':
     # 简单的模块自测：验证正向和逆向计算的闭环一致性
     print("=== 第二关节运动学模块测试 ===")
     
-    # 假设一个目标位姿：末端向 X=50, Y=50 偏置
+    # 假设一个目标位姿：+Y 已对齐点一/1号舵机方向，末端向 X=50, Y=50 偏置
     target_x, target_y, target_z = 50.0, 50.0, 420.0
     print(f"1. 期望末端位置: x={target_x}, y={target_y}, z={target_z}")
     

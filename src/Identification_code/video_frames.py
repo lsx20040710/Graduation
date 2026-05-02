@@ -42,9 +42,7 @@ def select_video_file():
     # 对话框使用完成后主动销毁根窗口，避免残留空白窗口。
     root.destroy()
 
-    if not video_path:
-        return None
-    return video_path
+    return video_path or None
 
 
 def read_frame_interval(default_interval=15):
@@ -110,6 +108,7 @@ def extract_frames(video_path, output_dir, frame_interval):
     if not cap.isOpened():
         raise RuntimeError(f"无法打开视频文件：{video_path}")
 
+    video_stem = Path(video_path).stem  # 获取视频文件名（不含后缀），用于前缀区分
     frame_count = 0
     saved_count = 0
 
@@ -120,8 +119,8 @@ def extract_frames(video_path, output_dir, frame_interval):
             break
 
         if frame_count % frame_interval == 0:
-            # 使用顺序编号命名图片，便于后续标注和数据集管理。
-            image_name = output_dir / f"video_frame_{saved_count:05d}.jpg"
+            # 使用视频名称作为前缀，拼接顺序编号命名图片，避免多视频抽帧互相覆盖。
+            image_name = output_dir / f"{video_stem}_{saved_count:05d}.jpg"
             cv2.imwrite(str(image_name), frame)
             saved_count += 1
 
