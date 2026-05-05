@@ -62,6 +62,15 @@ def main():
     target_y = 0.0
     target_z = L
 
+    # 新增：用于低通滤波（EMA）的平滑当前坐标
+    # 目的：解决机构惯性大导致的控制晃动问题
+    smooth_x = target_x
+    smooth_y = target_y
+
+    # 滤波系数 alpha (0 < alpha <= 1)
+    # alpha 越小越平滑，但跟随越慢。0.1~0.2 比较适合大惯性柔性机构。
+    ALPHA = 0.15
+
     print("\n==================================================")
     print("      操作空间 (X-Y 平面) 增量控制测试启动完毕！    ")
     print(" 坐标约定：+Y = 相机 +Y = 点一/1号舵机方向，+X 为俯视下相对点一顺时针90°")
@@ -80,54 +89,52 @@ def main():
             
             changed = False
             
-            # 检测按键，直接修改操作空间坐标；当前 +Y 已与点一/1号舵机方向对齐
+            # 检测按键，直接修改操作空间坐标（此时修改的只是理论目标点）
             if keyboard.is_pressed('up'):
                 target_y += STEP_XY
-                changed = True
             if keyboard.is_pressed('down'):
                 target_y -= STEP_XY
-                changed = True
             if keyboard.is_pressed('right'):
                 target_x += STEP_XY
-                changed = True
             if keyboard.is_pressed('left'):
                 target_x -= STEP_XY
-                changed = True
                 
-            if changed:
-                # -----------------------
-                # 1. 操作空间的数值约束与安全限位 (非常重要！)
-                # -----------------------
-                # 计算当前目标点到中心的二维距离 (半径)
-                r_target = math.sqrt(target_x**2 + target_y**2)
+            # -----------------------
+            # 1. 操作空间的数值约束与安全限位 (针对目标点 target)
+            # -----------------------
+            r_target = math.sqrt(target_x**2 + target_y**2)
+            if r_target > MAX_R:
+                scale = MAX_R / r_target
+                target_x *= scale
+                target_y *= scale
                 
-                # 如果半径超出了我们设定的最大安全范围
-                if r_target > MAX_R:
-                    # 等比例缩小 X 和 Y，使其保持在安全圆边界上，但方向不变
-                    scale = MAX_R / r_target
-                    target_x *= scale
-                    target_y *= scale
-                    
+            # -----------------------
+            # 新增：一阶低通滤波 (Exponential Moving Average)
+            # 每循环一次，平滑坐标向目标坐标靠近一小步
+            # -----------------------
+            smooth_x = ALPHA * target_x + (1 - ALPHA) * smooth_x
+            smooth_y = ALPHA * target_y + (1 - ALPHA) * smooth_y
+
+            # 只有当平滑坐标尚未达到目标，或者有按键按下时，才下发控制
+            # 这里设置一个微小的死区(0.1mm)避免无效的微小通信
+            if abs(smooth_x - target_x) > 0.1 or abs(smooth_y - target_y) > 0.1 or keyboard.is_pressed('up') or keyboard.is_pressed('down') or keyboard.is_pressed('left') or keyboard.is_pressed('right'):
+
                 # -----------------------
-                # 2. 映射：操作空间 -> 关节空间 -> 驱动空间
+                # 2. 映射：操作空间 -> 关节空间 -> 驱动空间 (使用滤波后的 smooth 坐标!)
                 # -----------------------
-                # 第一步：X, Y, Z -> 关节角 (theta, phi)
-                theta_rad, phi_rad = tip_position_to_joint(target_x, target_y, target_z)
+                theta_rad, phi_rad = tip_position_to_joint(smooth_x, smooth_y, target_z)
                 
-                # 第二步：关节角 -> 绳长变化 (dl4, dl5, dl6)
                 dl4, dl5, dl6 = joint_to_tendon_delta(theta_rad, phi_rad)
-                
-                # 第三步：绳长变化 -> 舵机目标角 (q4, q5, q6)
                 q4, q5, q6 = tendon_delta_to_motor_angle(dl4, dl5, dl6)
                 
                 deg4 = math.degrees(q4)
                 deg5 = math.degrees(q5)
                 deg6 = math.degrees(q6)
                 
-                # 下发指令，time_ms=100 实现平滑随动跟手
-                servo.set_multi_turn_angle_time(4, deg4, 100)
-                servo.set_multi_turn_angle_time(5, deg5, 100)
-                servo.set_multi_turn_angle_time(6, deg6, 100)
+                # 下发指令，time_ms 从100改为稍微长一点如150，配合滤波进一步减弱抖动
+                servo.set_multi_turn_angle_time(4, deg4, 150)
+                servo.set_multi_turn_angle_time(5, deg5, 150)
+                servo.set_multi_turn_angle_time(6, deg6, 150)
                 
                 # -----------------------
                 # 3. 反向回读与解算 (验证闭环真实执行情况)
@@ -141,20 +148,15 @@ def main():
                     real_q5 = math.radians(st5['angle_deg'])
                     real_q6 = math.radians(st6['angle_deg'])
                     
-                    # 转真实绳长
                     real_dl4, real_dl5, real_dl6 = motor_angle_to_tendon_delta(real_q4, real_q5, real_q6)
-                    # 转真实关节角
                     real_theta, real_phi = tendon_delta_to_joint(real_dl4, real_dl5, real_dl6)
-                    # 转真实操作空间坐标
                     real_x, real_y, real_z = joint_to_tip_position(real_theta, real_phi)
                     
-                    # 打印覆盖输出，对比我们的【目标 XY】和真实逆算出来的【真实 XY】
-                    print(f"\r[目标XY] X:{target_x:6.1f} Y:{target_y:6.1f} | [真实反算XY] X:{real_x:6.1f} Y:{real_y:6.1f}   ", end="", flush=True)
+                    print(f"\r[目标] X:{target_x:5.1f} Y:{target_y:5.1f} | [平滑] X:{smooth_x:5.1f} Y:{smooth_y:5.1f} | [反算] X:{real_x:5.1f} Y:{real_y:5.1f}   ", end="", flush=True)
                 
-                # 适当延时防止串口拥堵
-                time.sleep(0.05)
+                time.sleep(0.05) # 约 20Hz 的控制频率
             else:
-                # 没按键时降低CPU占用
+                # 已经到达目标且无按键，休眠
                 time.sleep(0.02)
                 
     except KeyboardInterrupt:

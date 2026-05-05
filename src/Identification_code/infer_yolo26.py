@@ -153,8 +153,8 @@ def run_camera_inference(model):
 
     run_servo_tracking_loop(model, cap, is_camera=True, map1=map1, map2=map2, fps_delay=1)
 
-def run_servo_tracking_loop(model, cap, is_camera=True, map1=None, map2=None, fps_delay=1):
-    """提取的通用识别控制循环（支持视频流和摄像头流）"""
+def run_servo_tracking_loop(model, cap, is_camera=True, map1=None, map2=None, fps_delay=1, servo_callback=None):
+    """提取的通用识别控制循环（支持视频流和摄像头流，支持回调视觉误差供伺服控制使用）"""
     
     print("\n>> 视觉伺服窗口已开启，请将焦点定在画面按 'q' 或 'Esc' 中止。")
     
@@ -191,6 +191,9 @@ def run_servo_tracking_loop(model, cap, is_camera=True, map1=None, map2=None, fp
         cv2.line(annotated_frame, (center_x, center_y - 30), (center_x, center_y + 30), (0, 255, 0), 2)
 
         # ====== 步骤4：找出离中心最近或最稳定的目标，提取并绘制 Error ======
+        err_x, err_y = 0.0, 0.0
+        target_found = False
+        
         if results[0].boxes is not None and len(results[0].boxes) > 0:
             # 找到首个（置信度高或追踪最稳）的锁定海参靶标
             box = results[0].boxes[0]
@@ -213,6 +216,11 @@ def run_servo_tracking_loop(model, cap, is_camera=True, map1=None, map2=None, fp
             # 在准星旁边印出数据
             err_text = f"Target Error -> dx: {err_x} px, dy: {err_y} px"
             cv2.putText(annotated_frame, err_text, (center_x + 10, center_y - 15), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 0, 255), 2)
+            target_found = True
+
+        # 如果传入了伺服控制回调函数，则把偏差发过去执行机械臂随动控制
+        if servo_callback is not None:
+            servo_callback(err_x if target_found else None, err_y if target_found else None, annotated_frame)
 
         # ====== 杂项：FPS状态渲染 ======
         frame_count += 1
