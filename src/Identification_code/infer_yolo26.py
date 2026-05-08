@@ -9,7 +9,9 @@ import os
 import sys
 import time
 import cv2
+from dataclasses import dataclass
 from pathlib import Path
+from typing import Optional, Tuple
 
 # 获取绝对路径，保证命令行从任何地方被启动都不偏离
 SCRIPT_DIR = Path(__file__).resolve().parent
@@ -32,6 +34,60 @@ if os.name == "nt":
     os.environ.setdefault("KMP_DUPLICATE_LIB_OK", "TRUE")
 
 
+# 低检测阈值先把候选目标交给 ByteTrack，后续由锁定 ID 和短时保持来抑制画框闪烁
+TRACK_CONFIDENCE = 0.30
+MAX_LOST_FRAMES = 5
+
+
+@dataclass
+class TrackedTargetState:
+    """
+    保存当前视觉伺服锁定目标的帧间状态。
+    track_id 来自 ByteTrack，用于跨帧锁定同一海参；短时漏检时继续保留上一帧框和误差，避免显示和伺服输入瞬间归零。
+    """
+    max_lost_frames: int = MAX_LOST_FRAMES
+    track_id: Optional[int] = None
+    bbox: Optional[Tuple[int, int, int, int]] = None
+    center: Optional[Tuple[int, int]] = None
+    err_x: Optional[float] = None
+    err_y: Optional[float] = None
+    confidence: float = 0.0
+    lost_frames: int = 0
+
+    def has_target(self):
+        """返回当前是否还有可用于绘制或控制的目标状态。"""
+        return self.bbox is not None and self.center is not None
+
+    def update(self, detection, image_center):
+        """用当前帧检测框刷新锁定目标，并计算相对相机中心的图像误差。"""
+        self.track_id = detection["track_id"]
+        self.bbox = detection["bbox"]
+        self.center = detection["center"]
+        self.confidence = detection["confidence"]
+        self.lost_frames = 0
+        self.err_x = float(self.center[0] - image_center[0])
+        self.err_y = float(image_center[1] - self.center[1])
+
+    def mark_lost(self):
+        """当前帧没有匹配到原 ID 时只增加丢失计数，不立刻清空上一帧目标。"""
+        if self.has_target():
+            self.lost_frames += 1
+
+    def can_hold(self):
+        """短时漏检期间允许沿用上一帧目标，超过阈值后释放目标。"""
+        return self.has_target() and self.lost_frames <= self.max_lost_frames
+
+    def reset(self):
+        """连续漏检超过阈值后清空锁定对象，下一次重新按画面中心选择目标。"""
+        self.track_id = None
+        self.bbox = None
+        self.center = None
+        self.err_x = None
+        self.err_y = None
+        self.confidence = 0.0
+        self.lost_frames = 0
+
+
 # ================= 1. UI 交互：保留简练的选择系统 =================
 
 def create_tk_root():
@@ -41,10 +97,18 @@ def create_tk_root():
     return root
 
 def find_latest_weight(search_root=SCRIPT_DIR):
-    candidate_paths = list(search_root.glob("*.pt")) + list(search_root.glob("runs/**/*.pt"))
+    # 优先从训练输出目录寻找 best.pt，这是针对当前海参特定训练的专有模型
+    candidate_paths = list(search_root.glob("runs/**/weights/best.pt"))
     if not candidate_paths:
-        return None
-    # 按照文件修改时间，取最新的
+        # 如果没有 best.pt，退而寻找 runs 里的任意 .pt (例如 last.pt)
+        candidate_paths = list(search_root.glob("runs/**/*.pt"))
+        if not candidate_paths:
+            # 实在没有，再找根目录下的原生预训练模型 (如 yolo26m.pt 等通用模型)
+            candidate_paths = list(search_root.glob("*.pt"))
+            if not candidate_paths:
+                return None
+    
+    # 按照文件修改时间，在同优先级下取最新的
     return sorted(candidate_paths, key=lambda x: x.stat().st_mtime, reverse=True)[0]
 
 def gui_select_weight():
@@ -100,13 +164,97 @@ def gui_select_media(mode):
 
 # ================= 2. 核心跟踪推理链路 =================
 
+def _extract_track_id(box):
+    """从 Ultralytics 的单个检测框中提取 ByteTrack ID；没有 ID 时返回 None。"""
+    if box.id is None:
+        return None
+    return int(box.id.cpu().numpy().item())
+
+
+def _extract_confidence(box):
+    """读取检测置信度，便于调试低阈值 Tracking 是否持续接收到目标。"""
+    if box.conf is None:
+        return 0.0
+    return float(box.conf.cpu().numpy().item())
+
+
+def _collect_detections(result):
+    """把 YOLO Boxes 转成轻量字典，后续目标锁定逻辑只依赖中心点、框、ID 和置信度。"""
+    detections = []
+    if result.boxes is None or len(result.boxes) == 0:
+        return detections
+
+    for box in result.boxes:
+        x1, y1, x2, y2 = box.xyxy[0].cpu().numpy()
+        bbox = (int(x1), int(y1), int(x2), int(y2))
+        center = (int((x1 + x2) / 2), int((y1 + y2) / 2))
+        detections.append({
+            "track_id": _extract_track_id(box),
+            "bbox": bbox,
+            "center": center,
+            "confidence": _extract_confidence(box),
+        })
+    return detections
+
+
+def _distance_sq(point_a, point_b):
+    """使用距离平方比较目标远近，避免每帧额外开方计算。"""
+    return (point_a[0] - point_b[0]) ** 2 + (point_a[1] - point_b[1]) ** 2
+
+
+def _select_detection_for_target(target_state, detections, image_center):
+    """
+    选择本帧要更新的目标。
+    已有 track_id 时必须匹配同一 ID；没有 ID 时才退化为按上一帧中心或画面中心选择。
+    """
+    if not detections:
+        return None
+
+    if target_state.track_id is not None:
+        for detection in detections:
+            if detection["track_id"] == target_state.track_id:
+                return detection
+        return None
+
+    reference_center = target_state.center if target_state.has_target() else image_center
+    return min(detections, key=lambda item: _distance_sq(item["center"], reference_center))
+
+
+def _draw_tracked_target(frame, target_state, image_center):
+    """手动画锁定目标，短时保持状态用黄色显示，当前帧真实匹配状态用红色显示。"""
+    if not target_state.can_hold():
+        return False
+
+    x1, y1, x2, y2 = target_state.bbox
+    obj_cx, obj_cy = target_state.center
+    is_live = target_state.lost_frames == 0
+    color = (0, 0, 255) if is_live else (0, 255, 255)
+    label = "LOCKED" if is_live else "HOLD"
+    track_label = target_state.track_id if target_state.track_id is not None else "none"
+
+    cv2.rectangle(frame, (x1, y1), (x2, y2), color, 3)
+    cv2.circle(frame, (obj_cx, obj_cy), 8, color, -1)
+    cv2.line(frame, image_center, (obj_cx, obj_cy), color, 3)
+
+    err_x = target_state.err_x if target_state.err_x is not None else 0.0
+    err_y = target_state.err_y if target_state.err_y is not None else 0.0
+    cv2.putText(frame, f"{label} ID:{track_label} lost:{target_state.lost_frames} conf:{target_state.confidence:.2f}",
+                (x1, max(25, y1 - 10)), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 0), 4)
+    cv2.putText(frame, f"{label} ID:{track_label} lost:{target_state.lost_frames} conf:{target_state.confidence:.2f}",
+                (x1, max(25, y1 - 10)), cv2.FONT_HERSHEY_SIMPLEX, 0.7, color, 2)
+    cv2.putText(frame, f"Target Error -> dx: {err_x:.1f} px, dy: {err_y:.1f} px",
+                (image_center[0] + 10, image_center[1] - 15), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 0, 0), 4)
+    cv2.putText(frame, f"Target Error -> dx: {err_x:.1f} px, dy: {err_y:.1f} px",
+                (image_center[0] + 10, image_center[1] - 15), cv2.FONT_HERSHEY_SIMPLEX, 0.8, color, 2)
+    return True
+
 def run_file_inference(model, file_path):
     """运用 Ultralytics 原生的 track 接口完成文件（图片/视频）稳定推理追踪"""
     print(f"\n>> 正在分析文件: {file_path}")
     
     # 图片文件直接使用原生自带接口即可，因为它不需要动态准星
     if str(file_path).lower().endswith(('.jpg', '.jpeg', '.png', '.bmp', '.webp')):
-        model.track(source=str(file_path), show=True, save=True, persist=True, tracker="bytetrack.yaml", project=str(SCRIPT_DIR / "runs" / "predict"))
+        model.track(source=str(file_path), conf=TRACK_CONFIDENCE, show=True, save=True, persist=True, tracker="bytetrack.yaml", project=str(SCRIPT_DIR / "runs" / "predict"))
         print(">> 图片分析完成！如果没报错的话结果已自动保存。")
         return
 
@@ -153,7 +301,7 @@ def run_camera_inference(model):
 
     run_servo_tracking_loop(model, cap, is_camera=True, map1=map1, map2=map2, fps_delay=1)
 
-def run_servo_tracking_loop(model, cap, is_camera=True, map1=None, map2=None, fps_delay=1, servo_callback=None):
+def run_servo_tracking_loop(model, cap, is_camera=True, map1=None, map2=None, fps_delay=1, servo_callback=None, record_video=False, plot_curve=False):
     """提取的通用识别控制循环（支持视频流和摄像头流，支持回调视觉误差供伺服控制使用）"""
     
     print("\n>> 视觉伺服窗口已开启，请将焦点定在画面按 'q' 或 'Esc' 中止。")
@@ -165,6 +313,23 @@ def run_servo_tracking_loop(model, cap, is_camera=True, map1=None, map2=None, fp
     prev_time = time.time()
     fps_display = 0.0
     frame_count = 0
+    
+    # 初始化录制功能
+    video_writer = None
+    if record_video:
+        timestamp = time.strftime("%Y%m%d_%H%M%S")
+        record_dir = SCRIPT_DIR / "runs" / "records"
+        record_dir.mkdir(parents=True, exist_ok=True)
+        vid_path = str(record_dir / f"servo_track_{timestamp}.avi")
+        # 由于我们这里不知道画面的最终实际宽高，我们在第一帧再初始化 writer
+        
+    # 初始化数据记录功能
+    time_history = []
+    err_x_history = []
+    err_y_history = []
+    start_time = time.time()
+    last_debug_time = 0.0
+    target_state = TrackedTargetState()
 
     while True:
         ret, frame = cap.read()
@@ -179,44 +344,33 @@ def run_servo_tracking_loop(model, cap, is_camera=True, map1=None, map2=None, fp
         # 缓存当前画面的物理中心 (基准点)
         frame_h, frame_w = frame.shape[:2]
         center_x, center_y = frame_w // 2, frame_h // 2
+        image_center = (center_x, center_y)
 
         # ====== 步骤2：目标稳定检测与帧间 Tracking ======
-        # persist=True 保障帧间卡尔曼滤波关联，能够极大缓解因水下浑浊造成某一帧漏检或框急剧跳动
-        results = model.track(source=frame, conf=0.3, persist=True, tracker="bytetrack.yaml", verbose=False)
-        annotated_frame = results[0].plot()
+        # 先以较低阈值保留候选框给 ByteTrack，再由 target_state 锁定 ID 和短时保持来决定最终显示目标
+        results = model.track(source=frame, conf=TRACK_CONFIDENCE, persist=True, tracker="bytetrack.yaml", verbose=False)
+        annotated_frame = frame.copy()
+        detections = _collect_detections(results[0])
+        matched_detection = _select_detection_for_target(target_state, detections, image_center)
+
+        if matched_detection is not None:
+            target_state.update(matched_detection, image_center)
+        else:
+            target_state.mark_lost()
+            if not target_state.can_hold():
+                target_state.reset()
 
         # ====== 步骤3：在画面中心打上参考准星靶心 ======
         # 画绿色的相机中心十字准星
         cv2.line(annotated_frame, (center_x - 30, center_y), (center_x + 30, center_y), (0, 255, 0), 2)
         cv2.line(annotated_frame, (center_x, center_y - 30), (center_x, center_y + 30), (0, 255, 0), 2)
 
-        # ====== 步骤4：找出离中心最近或最稳定的目标，提取并绘制 Error ======
+        # ====== 步骤4：绘制锁定目标，并提取当前可输出给伺服的 Error ======
         err_x, err_y = 0.0, 0.0
-        target_found = False
-        
-        if results[0].boxes is not None and len(results[0].boxes) > 0:
-            # 找到首个（置信度高或追踪最稳）的锁定海参靶标
-            box = results[0].boxes[0]
-            x1, y1, x2, y2 = box.xyxy[0].cpu().numpy()
-            
-            # 计算目标的质心位置
-            obj_cx = int((x1 + x2) / 2)
-            obj_cy = int((y1 + y2) / 2)
-            
-            # 视觉伺服中最重要的解：计算图像平面中的偏移量 e = [ex, ey]
-            # y 轴向上为正方向计算：
-            err_x = obj_cx - center_x
-            err_y = center_y - obj_cy
-            
-            # 画一个显眼的红色圆点在海参肚子正中央
-            cv2.circle(annotated_frame, (obj_cx, obj_cy), 8, (0, 0, 255), -1)
-            # 在中心和海参之间拉一条红线，直观表现出相差的距离向量
-            cv2.line(annotated_frame, (center_x, center_y), (obj_cx, obj_cy), (0, 0, 255), 3)
-            
-            # 在准星旁边印出数据
-            err_text = f"Target Error -> dx: {err_x} px, dy: {err_y} px"
-            cv2.putText(annotated_frame, err_text, (center_x + 10, center_y - 15), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 0, 255), 2)
-            target_found = True
+        target_found = _draw_tracked_target(annotated_frame, target_state, image_center)
+        if target_found:
+            err_x = target_state.err_x
+            err_y = target_state.err_y
 
         # 如果传入了伺服控制回调函数，则把偏差发过去执行机械臂随动控制
         if servo_callback is not None:
@@ -230,6 +384,13 @@ def run_servo_tracking_loop(model, cap, is_camera=True, map1=None, map2=None, fp
             prev_time = curr_time
             frame_count = 0
 
+        if curr_time - last_debug_time >= 1.0:
+            if target_state.has_target():
+                print(f"[追踪状态] track_id={target_state.track_id}, lost_frames={target_state.lost_frames}, err_x={target_state.err_x:.1f}, err_y={target_state.err_y:.1f}")
+            else:
+                print("[追踪状态] track_id=None, lost_frames=0, err_x=None, err_y=None")
+            last_debug_time = curr_time
+
         status_text = "Undistorted Tracking" if map1 is not None else ("Raw Fisheye Tracking" if is_camera else "Video Tracking")
         status_color = (0, 200, 0) if map1 is not None else ((0, 100, 255) if is_camera else (255, 100, 0))
         cv2.putText(annotated_frame, status_text, (20, 40), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 0), 4)
@@ -238,11 +399,80 @@ def run_servo_tracking_loop(model, cap, is_camera=True, map1=None, map2=None, fp
         cv2.putText(annotated_frame, f"FPS: {fps_display:.1f}", (20, 80), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 0), 4)
         cv2.putText(annotated_frame, f"FPS: {fps_display:.1f}", (20, 80), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 255), 2)
         
+        # 录制视频
+        if record_video:
+            if video_writer is None:
+                h, w = annotated_frame.shape[:2]
+                fourcc = cv2.VideoWriter_fourcc(*'XVID')
+                video_writer = cv2.VideoWriter(vid_path, fourcc, 30.0, (w, h))
+            video_writer.write(annotated_frame)
+            
+        # 记录误差用于绘制曲线
+        if plot_curve and target_found:
+            time_history.append(time.time() - start_time)
+            err_x_history.append(err_x)
+            err_y_history.append(err_y)
+
         cv2.imshow("YOLO Visual Servo Local View", annotated_frame)
         
         # 针对视频如果过快，延缓帧数；对摄像头则设为最小1ms
         if cv2.waitKey(int(fps_delay)) & 0xFF in [ord('q'), 27]:
             break
+
+    if video_writer is not None:
+        video_writer.release()
+        print(f">> 视频已保存至: {vid_path}")
+
+    if plot_curve and len(time_history) > 0:
+        try:
+            import matplotlib.pyplot as plt
+            timestamp = time.strftime("%Y%m%d_%H%M%S")
+            plot_dir = SCRIPT_DIR / "runs" / "records"
+            plot_dir.mkdir(parents=True, exist_ok=True)
+            plot_path = str(plot_dir / f"servo_error_{timestamp}.png")
+            
+            # 保存原始数据到 CSV
+            csv_path = str(plot_dir / f"servo_data_{timestamp}.csv")
+            with open(csv_path, "w", encoding="utf-8") as f:
+                f.write("Time(s),ErrorX(px),ErrorY(px)\n")
+                for t, ex, ey in zip(time_history, err_x_history, err_y_history):
+                    f.write(f"{t:.4f},{ex:.2f},{ey:.2f}\n")
+            print(f">> 原始伺服误差数据已保存至: {csv_path} (可用于二次裁剪绘图)")
+            
+            plt.figure(figsize=(10, 6))
+            plt.plot(time_history, err_x_history, label='Error X (px)', color='r', alpha=0.8)
+            plt.plot(time_history, err_y_history, label='Error Y (px)', color='b', alpha=0.8)
+            plt.axhline(0, color='black', linestyle='--', linewidth=1)
+            plt.title('Visual Servo Tracking Error Response', fontsize=14)
+            plt.xlabel('Time (s)', fontsize=12)
+            plt.ylabel('Pixel Error (px)', fontsize=12)
+            plt.legend(loc='upper right')
+            plt.grid(True, linestyle=':', alpha=0.7)
+            plt.tight_layout()
+            plt.savefig(plot_path, dpi=300)
+            print(f">> 响应曲线已保存至: {plot_path}")
+
+            # 画二维轨迹图
+            plot_traj_path = str(plot_dir / f"servo_traj_{timestamp}.png")
+            plt.figure(figsize=(8, 8))
+            plt.plot(err_x_history, err_y_history, marker='o', markersize=4, linestyle='-', color='purple', alpha=0.6, label='Trajectory')
+            plt.plot(err_x_history[0], err_y_history[0], 'go', markersize=10, label='Start') # 起点
+            plt.plot(err_x_history[-1], err_y_history[-1], 'ro', markersize=10, label='End') # 终点
+            plt.plot(0, 0, 'k+', markersize=15, markeredgewidth=2, label='Target Center') # 靶心
+            plt.title('2D Image-Plane Trajectory', fontsize=14)
+            plt.xlabel('Error X (px)', fontsize=12)
+            plt.ylabel('Error Y (px)', fontsize=12)
+            plt.axhline(0, color='black', linestyle='--', linewidth=1)
+            plt.axvline(0, color='black', linestyle='--', linewidth=1)
+            plt.legend(loc='best')
+            plt.grid(True, linestyle=':', alpha=0.7)
+            plt.axis('equal') # 保证 X 和 Y 的比例尺相同
+            plt.tight_layout()
+            plt.savefig(plot_traj_path, dpi=300)
+            print(f">> 2D二维轨迹图已保存至: {plot_traj_path}")
+
+        except ImportError:
+            print("【警告】未安装 matplotlib 库，无法绘制保存响应曲线！请先运行: pip install matplotlib")
 
     cap.release()
     cv2.destroyAllWindows()

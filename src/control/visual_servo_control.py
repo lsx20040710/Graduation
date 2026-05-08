@@ -53,6 +53,9 @@ from multi_joint_kinematics import (
 # ==========================================
 # 系统全局配置参数
 # ==========================================
+# 论文数据采集开关（如需在退出时自动录像并保存曲线，将其改为 True 即可，不影响您统一调试参数）
+DATA_COLLECTION_MODE = True
+
 COM_PORT = 'COM7'
 SERVO_IDS = [1, 2, 3, 4, 5, 6]
 CAMERA_IDX = 1
@@ -232,9 +235,13 @@ def main():
 
         print("\n>>> 系统就绪！")
         print(" - YOLO已经接管第一关节，正在追踪海参！")
+        print(" - 第二关节由键盘【上/下/左/右】方向键进行手动微调！")
         
         # ！！！直接调用你写好的跟踪循环，并注入我们的控制回调函数！！！
-        run_servo_tracking_loop(model, cap, is_camera=True, map1=map1, map2=map2, fps_delay=1, servo_callback=visual_servo_callback)
+        run_servo_tracking_loop(model, cap, is_camera=True, map1=map1, map2=map2, fps_delay=1, 
+                                servo_callback=visual_servo_callback,
+                                record_video=DATA_COLLECTION_MODE,
+                                plot_curve=DATA_COLLECTION_MODE)
 
     except Exception as e:
         print("\n运行中发生异常:")

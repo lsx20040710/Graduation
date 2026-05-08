@@ -9,7 +9,7 @@ plt.rcParams['axes.unicode_minus'] = False
 # ==========================================
 # 第一关节物理参数定义
 # ==========================================
-L = 426.0       # 第一关节总有效长度 (mm)
+L = 284.0       # 第一关节总有效长度 (mm)
 R = 20.0        # 第一关节驱动绳孔位半径 (mm) 2cm -> 20mm
 
 # ==========================================
@@ -46,7 +46,7 @@ def joint_to_tip_position(theta, phi):
 
 def run_simulation():
     fig = plt.figure(figsize=(14, 10))
-    fig.suptitle('第一关节纯理想模型控制仿真：绳长变化规律 (L=426mm, R=20mm)', fontsize=16, fontweight='bold')
+    fig.suptitle('第一关节纯理想模型控制仿真：绳长变化规律 (L=284mm, R=20mm)', fontsize=16, fontweight='bold')
 
     # 生成从 0 到 60 度的弯曲角序列
     thetas = np.linspace(0, np.radians(60), 100)

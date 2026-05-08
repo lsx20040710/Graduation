@@ -34,7 +34,7 @@ SERVO_IDS = [1, 2, 3, 4, 5, 6]  # 控制全部 6 个舵机
 # ==========================================
 # 第一关节 (末端追踪，操作空间控制)
 STEP_XY_1 = 5.0      # (mm)
-MAX_R_1 = 150.0      # 限制第一关节 XY 偏移半径 (mm)
+MAX_R_1 = 350.0      # 限制第一关节 XY 偏移半径 (mm)
 
 # 第二关节 (基座微调，关节空间控制)
 STEP_THETA_2 = 1.0   # (度)
@@ -101,9 +101,7 @@ def main():
     try:
         while True:
             if keyboard.is_pressed('esc'):
-                print("\n收到退出指令，释放舵机扭矩并退出...")
-                for sid in SERVO_IDS:
-                    servo.release_lock(sid)
+                print("\n收到退出指令，准备退出...")
                 break
             
             # -------------------------------------------------
@@ -182,9 +180,23 @@ def main():
             time.sleep(0.05) # 约 20Hz 控制循环
                 
     except KeyboardInterrupt:
-        print("\n检测到 Ctrl+C，释放舵机...")
+        print("\n检测到 Ctrl+C，准备退出...")
+    except Exception as e:
+        print(f"\n发生异常: {e}")
+    finally:
+        print("\n正在使所有关节缓慢回归静息(直立)位置...")
+        try:
+            for sid in SERVO_IDS:
+                servo.set_multi_turn_angle_time(sid, 0.0, 2000)
+            time.sleep(2.2)
+        except:
+            pass
+        print("释放舵机...")
         for sid in SERVO_IDS:
-            servo.release_lock(sid)
+            try:
+                servo.release_lock(sid)
+            except:
+                pass
 
 if __name__ == '__main__':
     main()

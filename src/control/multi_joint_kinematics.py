@@ -8,13 +8,14 @@ R_W = 6.5       # 绕线轮半径 (mm)
 
 # 柔性机构补偿参数 (非对称收放策略)
 # 针对物理骨架受压变形导致的背面驱动绳严重松弛问题
-RELEASE_RATIO = 0.2  
+J1_RELEASE_RATIO = 0.1  # 针对第一关节(内部绳)的松放比例 (越小越紧，若仍松可继续调小)
+J2_RELEASE_RATIO = 0.2   # 针对第二关节(外部绳)的松放比例 (当前 0.2 效果良好)
 
 # ------------------------------------------
 # 第一关节 (末端操作关节)
 # 对应绳 1, 2, 3，由于它从底部穿到顶部，因此受第一关节和第二关节的双重影响
 # ------------------------------------------
-J1_L = 426.0    # 关节总有效长度 (mm)
+J1_L = 284.0    # 关节总有效长度 (mm)
 J1_R = 20.0     # 内侧过线孔半径 (mm)
 
 # 代码坐标系：+y 轴沿点一/1号舵机方向；机械俯视顺时针角 beta 转数学角 alpha。
@@ -43,7 +44,7 @@ J1_ALPHAS = [
 # 第二关节 (基座关节)
 # 对应绳 4, 5, 6，它只穿过第二关节自身，不受第一关节影响
 # ------------------------------------------
-J2_L = 426.0    # 关节总有效长度 (mm)
+J2_L = 284.0    # 关节总有效长度 (mm)
 J2_R = 40.0     # 外侧过线孔半径 (mm)
 
 # 绳 4, 5, 6 的安装极角，对应点四、点五、点六
@@ -87,9 +88,9 @@ def joint2_to_tendon_delta(theta2, phi2):
     dl6_raw = J2_R * theta2 * math.cos(phi2 - J2_ALPHAS[2])
     
     # 实施非对称松放策略
-    dl4 = dl4_raw if dl4_raw > 0 else dl4_raw * RELEASE_RATIO
-    dl5 = dl5_raw if dl5_raw > 0 else dl5_raw * RELEASE_RATIO
-    dl6 = dl6_raw if dl6_raw > 0 else dl6_raw * RELEASE_RATIO
+    dl4 = dl4_raw if dl4_raw > 0 else dl4_raw * J2_RELEASE_RATIO
+    dl5 = dl5_raw if dl5_raw > 0 else dl5_raw * J2_RELEASE_RATIO
+    dl6 = dl6_raw if dl6_raw > 0 else dl6_raw * J2_RELEASE_RATIO
     
     return dl4, dl5, dl6
 
@@ -98,7 +99,7 @@ def tendon_delta_to_joint2(dl4, dl5, dl6):
     逆向映射：绳 4, 5, 6 绳长变化量 -> 关节 2 变量
     """
     def undo_comp(dl):
-        return dl if dl > 0 else dl / RELEASE_RATIO
+        return dl if dl > 0 else dl / J2_RELEASE_RATIO
         
     dl4_raw = undo_comp(dl4)
     dl5_raw = undo_comp(dl5)
@@ -117,17 +118,30 @@ def tendon_delta_to_joint2(dl4, dl5, dl6):
 def joint1_to_tendon_delta_coupled(theta1, phi1, theta2, phi2):
     """
     正向耦合映射：关节 1 和 关节 2 变量 -> 绳 1, 2, 3 绳长变化量
-    因为绳 1,2,3 穿过两个关节，所以受双重影响。
+    因为绳 1,2,3 穿过两个关节，所以受双重影响。必须分段进行松放补偿。
     """
-    # 绳长总变化 = 第一关节自身的拉扯 + 第二关节弯曲导致的连带拉扯
-    dl1_raw = (J1_R * theta1 * math.cos(phi1 - J1_ALPHAS[0])) + (J1_R * theta2 * math.cos(phi2 - J1_ALPHAS[0]))
-    dl2_raw = (J1_R * theta1 * math.cos(phi1 - J1_ALPHAS[1])) + (J1_R * theta2 * math.cos(phi2 - J1_ALPHAS[1]))
-    dl3_raw = (J1_R * theta1 * math.cos(phi1 - J1_ALPHAS[2])) + (J1_R * theta2 * math.cos(phi2 - J1_ALPHAS[2]))
+    # 1. 第一关节自身的拉扯量及非对称补偿
+    dl1_j1 = J1_R * theta1 * math.cos(phi1 - J1_ALPHAS[0])
+    dl2_j1 = J1_R * theta1 * math.cos(phi1 - J1_ALPHAS[1])
+    dl3_j1 = J1_R * theta1 * math.cos(phi1 - J1_ALPHAS[2])
     
-    # 实施非对称松放策略 (在总体变形后应用)
-    dl1 = dl1_raw if dl1_raw > 0 else dl1_raw * RELEASE_RATIO
-    dl2 = dl2_raw if dl2_raw > 0 else dl2_raw * RELEASE_RATIO
-    dl3 = dl3_raw if dl3_raw > 0 else dl3_raw * RELEASE_RATIO
+    dl1_j1_comp = dl1_j1 if dl1_j1 > 0 else dl1_j1 * J1_RELEASE_RATIO
+    dl2_j1_comp = dl2_j1 if dl2_j1 > 0 else dl2_j1 * J1_RELEASE_RATIO
+    dl3_j1_comp = dl3_j1 if dl3_j1 > 0 else dl3_j1 * J1_RELEASE_RATIO
+
+    # 2. 第二关节弯曲导致的连带拉扯量及非对称补偿
+    dl1_j2 = J1_R * theta2 * math.cos(phi2 - J1_ALPHAS[0])
+    dl2_j2 = J1_R * theta2 * math.cos(phi2 - J1_ALPHAS[1])
+    dl3_j2 = J1_R * theta2 * math.cos(phi2 - J1_ALPHAS[2])
+    
+    dl1_j2_comp = dl1_j2 if dl1_j2 > 0 else dl1_j2 * J1_RELEASE_RATIO
+    dl2_j2_comp = dl2_j2 if dl2_j2 > 0 else dl2_j2 * J1_RELEASE_RATIO
+    dl3_j2_comp = dl3_j2 if dl3_j2 > 0 else dl3_j2 * J1_RELEASE_RATIO
+
+    # 3. 绳长总变化 = 第一关节段实际需求 + 第二关节段实际需求
+    dl1 = dl1_j1_comp + dl1_j2_comp
+    dl2 = dl2_j1_comp + dl2_j2_comp
+    dl3 = dl3_j1_comp + dl3_j2_comp
     
     return dl1, dl2, dl3
 
@@ -136,18 +150,29 @@ def tendon_delta_to_joint1_coupled(dl1, dl2, dl3, theta2, phi2):
     逆向解耦映射：绳 1, 2, 3 绳长变化量 + 已知的关节 2 变量 -> 关节 1 变量
     用于从舵机状态反算当前第一关节的真实姿态。
     """
-    def undo_comp(dl):
-        return dl if dl > 0 else dl / RELEASE_RATIO
+    # 1. 计算第二关节弯曲消耗的绳长及对应的补偿量
+    dl1_j2 = J1_R * theta2 * math.cos(phi2 - J1_ALPHAS[0])
+    dl2_j2 = J1_R * theta2 * math.cos(phi2 - J1_ALPHAS[1])
+    dl3_j2 = J1_R * theta2 * math.cos(phi2 - J1_ALPHAS[2])
+    
+    dl1_j2_comp = dl1_j2 if dl1_j2 > 0 else dl1_j2 * J1_RELEASE_RATIO
+    dl2_j2_comp = dl2_j2 if dl2_j2 > 0 else dl2_j2 * J1_RELEASE_RATIO
+    dl3_j2_comp = dl3_j2 if dl3_j2 > 0 else dl3_j2 * J1_RELEASE_RATIO
+    
+    # 2. 从总绳长中减去第二关节段的真实消耗，剩余为第一关节段的真实变形量
+    dl1_j1_comp = dl1 - dl1_j2_comp
+    dl2_j1_comp = dl2 - dl2_j2_comp
+    dl3_j1_comp = dl3 - dl3_j2_comp
+    
+    # 3. 对第一关节段逆向解除松放补偿
+    def undo_comp(dl_comp):
+        return dl_comp if dl_comp > 0 else dl_comp / J1_RELEASE_RATIO
         
-    dl1_total = undo_comp(dl1)
-    dl2_total = undo_comp(dl2)
-    dl3_total = undo_comp(dl3)
+    dl1_j1 = undo_comp(dl1_j1_comp)
+    dl2_j1 = undo_comp(dl2_j1_comp)
+    dl3_j1 = undo_comp(dl3_j1_comp)
     
-    # 减去由于第二关节弯曲造成的拉伸补偿量，剩下就是第一关节自己的真实弯曲量
-    dl1_j1 = dl1_total - J1_R * theta2 * math.cos(phi2 - J1_ALPHAS[0])
-    dl2_j1 = dl2_total - J1_R * theta2 * math.cos(phi2 - J1_ALPHAS[1])
-    dl3_j1 = dl3_total - J1_R * theta2 * math.cos(phi2 - J1_ALPHAS[2])
-    
+    # 4. 反解计算第一关节真实的弯曲角和旋转角
     kx = (2.0 / 3.0) * (dl1_j1 * math.cos(J1_ALPHAS[0]) + dl2_j1 * math.cos(J1_ALPHAS[1]) + dl3_j1 * math.cos(J1_ALPHAS[2]))
     ky = (2.0 / 3.0) * (dl1_j1 * math.sin(J1_ALPHAS[0]) + dl2_j1 * math.sin(J1_ALPHAS[1]) + dl3_j1 * math.sin(J1_ALPHAS[2]))
     

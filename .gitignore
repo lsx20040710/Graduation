@@ -1,0 +1,25 @@
+# Python 运行缓存
+__pycache__/
+*.py[cod]
+*.pyc.*
+
+# 本地临时导出和检查缓存
+tmp/
+
+# LaTeX 编译中间产物，PDF 输出按需保留
+*.aux
+*.fdb_latexmk
+*.fls
+*.log
+*.out
+*.synctex.gz
+*.toc
+*.xdv
+
+# ROS2/colcon 构建产物目录；当前阶段保留本地文件，不作为 Python 主链路源码
+build/
+install/
+log/
+
+# 标定角点调试图可由原始棋盘图和标定脚本重新生成
+src/calibration/output/debug_corners/

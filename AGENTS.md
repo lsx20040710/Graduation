@@ -18,9 +18,9 @@ This project should NOT be treated as:
 - a standard 6-DOF rigid industrial manipulator project
 
 The robot structure should currently be understood as:
-- each joint is composed of three units
+- each joint is composed of two units
 - each joint is driven by three tendons
-- the full robot has two joints and six tendons in total
+- the full robot has two joints, four units, and six tendons in total
 - the current mechanism references `DewiEtAl-2024-TendonDrivenContinuumRobot-ModularStiffness-ZHTranslation.pdf.pdf`
   conceptually, but is modified and scaled for this project
 

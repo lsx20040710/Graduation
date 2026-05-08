@@ -82,9 +82,7 @@ def main():
     try:
         while True:
             if keyboard.is_pressed('esc'):
-                print("\n收到退出指令，释放舵机扭矩并退出...")
-                for sid in SERVO_IDS:
-                    servo.release_lock(sid)
+                print("\n收到退出指令，准备退出...")
                 break
             
             changed = False
@@ -160,9 +158,23 @@ def main():
                 time.sleep(0.02)
                 
     except KeyboardInterrupt:
-        print("\n检测到 Ctrl+C，释放舵机...")
+        print("\n检测到 Ctrl+C，准备退出...")
+    except Exception as e:
+        print(f"\n发生异常: {e}")
+    finally:
+        print("\n正在使所有关节缓慢回归静息(直立)位置...")
+        try:
+            for sid in SERVO_IDS:
+                servo.set_multi_turn_angle_time(sid, 0.0, 2000)
+            time.sleep(2.2)
+        except:
+            pass
+        print("释放舵机...")
         for sid in SERVO_IDS:
-            servo.release_lock(sid)
+            try:
+                servo.release_lock(sid)
+            except:
+                pass
 
 if __name__ == '__main__':
     main()

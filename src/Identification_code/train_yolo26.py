@@ -17,13 +17,13 @@ if os.name == "nt":
 def parse_args():
     parser = argparse.ArgumentParser(description="海参检测模型训练简练版脚本")
     parser.add_argument("--data", default="data.yaml", help="数据集配置文件路径 (必须存在)")
-    parser.add_argument("--model", default="yolo26n.pt", help="预训练权重(如 yolo26n.pt, yolov8n.pt)")
+    parser.add_argument("--model", default="yolo26m.pt", help="预训练权重(如 yolo26n.pt, yolo26m.pt)")
     parser.add_argument("--epochs", type=int, default=150, help="训练轮数")
     parser.add_argument("--imgsz", type=int, default=640, help="输入图像尺寸")
     parser.add_argument("--batch", type=int, default=16, help="批大小")
     parser.add_argument("--device", default="", help="训练设备如 0, 0,1 或 cpu。不填将自动选择")
     parser.add_argument("--workers", type=int, default=4, help="数据加载线程数 (Windows建议不超4)")
-    parser.add_argument("--run-name", default="yolo26_runs", help="本次实验名称")
+    parser.add_argument("--run-name", default="yolo26m_runs", help="本次实验名称")
     return parser.parse_args()
 
 def main():

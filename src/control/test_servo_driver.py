@@ -130,10 +130,22 @@ def main():
         # 选择舵机
         while True:
             try:
-                target_id_str = input(f"请输入你想操作的舵机 ID （在 {active_ids} 中选择，或输入 q 退出）：")
+                target_id_str = input(f"请输入你想操作的舵机 ID （在 {active_ids} 中选择，输入 a 校准全部零点，或输入 q 退出）：")
                 if target_id_str.strip().lower() == 'q':
                     print("退出测试交互程序...")
                     return
+                elif target_id_str.strip().lower() == 'a':
+                    print(f"\n【警告】 即将把当前在线的所有舵机 {active_ids} 的物理位置全部强行设置为 0 度原点！")
+                    print("【重要】 请确保所有软体臂目前都处于完全放松、直立的静息状态！")
+                    confirm = input("确定要全部设置原点吗？(y/n): ").strip().lower()
+                    if confirm == 'y':
+                        for sid in active_ids:
+                            servo.set_zero_point(sid)
+                            time.sleep(0.05)
+                        print("全部原点设置完成。\n")
+                    else:
+                        print("取消设置全部原点。\n")
+                    continue
                 target_id = int(target_id_str)
                 if target_id in active_ids:
                     break
