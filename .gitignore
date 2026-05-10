@@ -1,3 +1,9 @@
+# 本机编辑器和临时配置
+.vscode/
+.idea/
+*.code-workspace
+.codex
+
 # Python 运行缓存
 __pycache__/
 *.py[cod]
@@ -5,6 +11,26 @@ __pycache__/
 
 # 本地临时导出和检查缓存
 tmp/
+
+# 本地数据、实验结果和训练输出
+experiments/**/results/
+src/calibration/captures/
+src/calibration/output/
+src/Identification_code/raw_data/
+src/Identification_code/datasets/
+src/Identification_code/test_picture_video/
+src/Identification_code/runs/
+*.pt
+
+# 个人论文、论文图片、草稿和汇报材料
+paper/docs/
+paper/doc/
+paper/prepared_images/
+paper/tex/main/*
+!paper/tex/main/.latexmkrc
+paper/tex/Idea/
+ppt/
+to_human/
 
 # LaTeX 编译中间产物，PDF 输出按需保留
 *.aux
