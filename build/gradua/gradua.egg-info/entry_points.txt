@@ -1,4 +1,0 @@
-[console_scripts]
-fast_undistort = gradua.fast_undistort:main
-undistort_preview = gradua.undistort_preview_node:main
-
